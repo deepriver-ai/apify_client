@@ -1,0 +1,3 @@
+actor_class,keywords,country_id,language,min_date,max_results,method,enabled,publish,actor_params
+google_news,"totalenergies",_484,es,2026-03-15,30,search,true,true,"{""timeframe"":""1d"",""enrich"":true}"
+instagram_hashtags,"#totalenergies",,es,,50,search,true,true,"{""keyword_search"":false}"
