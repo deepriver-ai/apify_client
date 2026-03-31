@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from apify_client import ApifyClient
@@ -12,13 +12,14 @@ APIFI_API_TOKEN = os.getenv("APIFI_API_TOKEN")
 
 logger = logging.getLogger(__name__)
 
+PERIOD_DAYS = {"d": 1, "w": 7, "m": 30}
+
 
 class ApifyActor:
     """Base class for Apify actor wrappers.
 
-    Subclasses must set ``actor_id`` and implement ``search()``,
-    ``get_data()``, or ``get_page_data()`` to create Documents from raw
-    Apify results.
+    Subclasses must set ``actor_id`` and implement ``search()`` to create
+    Documents from raw Apify results.
 
     After creating Documents, subclasses call ``process_documents()``
     which runs a staged pipeline ordered by cost:
@@ -59,11 +60,17 @@ class ApifyActor:
         documents = self._filter_language(documents, **kwargs)
         documents = self._enrich_location(documents, **kwargs)
         documents = self._filter_location(documents, **kwargs)
+        documents = self._enrich_comments(documents, **kwargs)
         return documents
 
     def _filter_date(self, documents: List, **kwargs) -> List:
-        """Filter documents by min_date. Runs pre-enrichment (timestamp available from API)."""
+        """Filter documents by min_date or period. Runs pre-enrichment (timestamp available from API)."""
         min_date = kwargs.get("min_date")
+        period = kwargs.get("period")
+        if not min_date and period:
+            days = PERIOD_DAYS.get(period)
+            if days:
+                min_date = datetime.now() - timedelta(days=days)
         if not min_date or not isinstance(min_date, datetime):
             return documents
         before = len(documents)
@@ -86,7 +93,11 @@ class ApifyActor:
         return documents
 
     def _enrich_location(self, documents: List, **kwargs) -> List:
-        """Enrich document location. No-op by default; subclasses override."""
+        """Enrich document location."""
+        
+        for doc in documents:
+            doc.add_locations()
+
         return documents
 
     def _filter_location(self, documents: List, **kwargs) -> List:
@@ -99,16 +110,12 @@ class ApifyActor:
         logger.info("Location filter (country_id=%s): %d → %d documents", country_id, before, len(documents))
         return documents
 
+    def _enrich_comments(self, documents: List, **kwargs) -> List:
+        """Enrich documents with comments. No-op by default; subclasses override."""
+        return documents
+
     # --- Actor interface ---
 
-    def search(self, keywords: List[str], **kwargs) -> List:
-        """Search by keywords. Returns list of Documents."""
-        raise NotImplementedError
-
-    def get_data(self, urls: List[str], **kwargs) -> List:
-        """Fetch data for specific post/article URLs. Returns list of Documents."""
-        raise NotImplementedError
-
-    def get_page_data(self, profile_urls: List[str], **kwargs) -> List:
-        """Fetch data from profile/page URLs. Returns list of Documents."""
+    def search(self, search_params: List[str], **kwargs) -> List:
+        """Search by the given parameters. Returns list of Documents."""
         raise NotImplementedError

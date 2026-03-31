@@ -21,7 +21,7 @@ class GoogleNewsActor(ApifyActor):
         super().__init__(*args, **kwargs)
         self.sources_manager = SourcesManagement()
 
-    def search(self, keywords: List[str], **kwargs) -> List[News]:
+    def search(self, search_params: List[str], **kwargs) -> List[News]:
         max_articles = kwargs.get("max_articles") or kwargs.get("max_results", 30)
         timeframe = kwargs.get("timeframe", "1d")
         region_language = kwargs.get("region_language", "MX:es-419")
@@ -30,7 +30,7 @@ class GoogleNewsActor(ApifyActor):
         extract_images = kwargs.get("extract_images", False)
 
         run_input: Dict[str, Any] = {
-            "keywords": keywords,
+            "keywords": search_params,
             "topics": [],
             "topicUrls": [],
             "maxArticles": max_articles,
@@ -54,6 +54,12 @@ class GoogleNewsActor(ApifyActor):
             return documents
         for doc in documents:
             doc.fetch_and_parse()
+        return documents
+
+    def _enrich_comments(self, documents: List, **kwargs) -> List:
+        """Comments are not supported for Google News."""
+        if kwargs.get("get_comments"):
+            logger.info("get_comments is not supported for Google News scraper, ignoring")
         return documents
 
     def _enrich_location(self, documents: List, **kwargs) -> List:

@@ -34,17 +34,25 @@ def _build_domain_country_id(sources: List[Dict[str, Any]]) -> Dict[str, str]:
     }
 
 
-def _build_domain_location(sources: List[Dict[str, Any]]) -> Dict[str, Dict[str, str | None]]:
-    """Build a mapping of domain -> {location_text, location_id} from source stats."""
+def _build_domain_location(sources: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Build a mapping of domain -> full author location dict from source stats."""
     result = {}
     for s in sources:
         stats = s.get("stats", {})
         geoid = stats.get("location_author_geoid")
         if geoid is not None:
-            result[s["domain"]] = {
-                "location_text": stats.get("location_author_formatted_name"),
-                "location_id": geoid,
+            loc: Dict[str, Any] = {
+                "author_location_text": stats.get("location_author_formatted_name"),
+                "author_location_id": geoid,
+                "location_author_formatted_name": stats.get("location_author_formatted_name"),
+                "location_author_geoid": geoid,
+                "location_author_coords": stats.get("location_author_coords"),
+                "location_author_precision_level": stats.get("location_author_precision_level"),
             }
+            for i in range(1, 4):
+                loc[f"location_author_level_{i}"] = stats.get(f"location_author_level_{i}")
+                loc[f"location_author_level_{i}_id"] = stats.get(f"location_author_level_{i}_id")
+            result[s["domain"]] = loc
     return result
 
 
@@ -80,9 +88,20 @@ class SourcesManagement:
         """Return the country_id for a domain, or None if not mapped."""
         return _domain_country_id.get(domain)
 
-    def get_location(self, domain: str) -> Dict[str, str | None]:
-        """Return {location_text, location_id} for a domain, or both None if not mapped."""
-        return _domain_location.get(domain, {"location_text": None, "location_id": None})
+    def get_location(self, domain: str) -> Dict[str, Any]:
+        """Return full author location dict for a domain, or all-None if not mapped."""
+        default: Dict[str, Any] = {
+            "author_location_text": None,
+            "author_location_id": None,
+            "location_author_formatted_name": None,
+            "location_author_geoid": None,
+            "location_author_coords": None,
+            "location_author_precision_level": None,
+        }
+        for i in range(1, 4):
+            default[f"location_author_level_{i}"] = None
+            default[f"location_author_level_{i}_id"] = None
+        return _domain_location.get(domain, default)
 
     # --- Unknown source tracking ---
 

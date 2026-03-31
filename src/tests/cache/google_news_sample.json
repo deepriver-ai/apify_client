@@ -1,0 +1,47 @@
+[
+  {
+    "title": "TotalEnergies: Gobierno de Trump pagar\u00e1 a empresa francesa por abandonar proyectos de energ\u00eda e\u00f3lica",
+    "url": "https://www.univision.com/noticias/estados-unidos/totalenergies-gobierno-de-trump-pagara-a-empresa-francesa-por-abandonar-proyectos-de-energia-eolica",
+    "source": "Univision",
+    "publishedAt": "2026-03-25T23:45:08Z",
+    "publishedTimestamp": 1774482308000,
+    "image": null,
+    "metadata": {
+      "scrapeTimestamp": "2026-03-26T05:46:12.291676",
+      "keyword": "totalenergies",
+      "sourceType": "keyword",
+      "timeframe": "1d"
+    },
+    "description": "Gobierno de Trump pagar\u00e1 1,000 millones a TotalEnergies para frenar proyectos e\u00f3licos marinos y redirigir inversi\u00f3n hacia petr\u00f3leo y gas. | N+ Univision Estados Unidos | Univision"
+  },
+  {
+    "title": "EE.UU. indemniza a TotalEnergies con $1,000 millones y acelera apuesta por el gas",
+    "url": "https://es-us.finanzas.yahoo.com/noticias/ee-uu-indemniza-totalenergies-1-010938413.html",
+    "source": "Yahoo Finanzas",
+    "publishedAt": "2026-03-26T01:09:00Z",
+    "publishedTimestamp": 1774487340000,
+    "image": null,
+    "metadata": {
+      "scrapeTimestamp": "2026-03-26T05:46:12.803781",
+      "keyword": "totalenergies",
+      "sourceType": "keyword",
+      "timeframe": "1d"
+    },
+    "description": "La Casa Blanca acord\u00f3 reembolsar cerca de $1,000 millones a TotalEnergies tras la cancelaci\u00f3n de sus proyectos de energ\u00eda e\u00f3lica marina en la costa este, marcando un cambio relevante hacia combustibles f\u00f3siles en la estrategia energ\u00e9tica del pa\u00eds."
+  },
+  {
+    "title": "TotalEnergies abandona la e\u00f3lica marina en EE. UU.",
+    "url": "https://inspenet.com/noticias/totalenergies-eolica-marina-en-ee-uu/",
+    "source": "Inspenet",
+    "publishedAt": "2026-03-25T14:28:12Z",
+    "publishedTimestamp": 1774448892000,
+    "image": null,
+    "metadata": {
+      "scrapeTimestamp": "2026-03-26T05:46:13.267406",
+      "keyword": "totalenergies",
+      "sourceType": "keyword",
+      "timeframe": "1d"
+    },
+    "description": "TotalEnergies abandona proyectos de energ\u00eda e\u00f3lica marina en EE. UU. y redirige su inversi\u00f3n hacia gas natural, GNL y producci\u00f3n energ\u00e9tica."
+  }
+]

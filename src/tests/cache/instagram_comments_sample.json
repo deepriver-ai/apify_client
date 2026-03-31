@@ -1,0 +1,35 @@
+[
+  {
+    "id": "18045678901234567",
+    "text": "Great post! Very informative 🔥",
+    "ownerUsername": "energyfan123",
+    "ownerProfilePicUrl": "https://example.com/pic1.jpg",
+    "timestamp": "2026-03-26T05:00:00.000Z",
+    "likesCount": 3,
+    "repliesCount": 0,
+    "inputUrl": "https://www.instagram.com/p/DWVPBIaDckF/",
+    "postUrl": "https://www.instagram.com/p/DWVPBIaDckF/"
+  },
+  {
+    "id": "18045678901234568",
+    "text": "Interesting perspective on energy policy",
+    "ownerUsername": "climate_watch",
+    "ownerProfilePicUrl": "https://example.com/pic2.jpg",
+    "timestamp": "2026-03-26T04:30:00.000Z",
+    "likesCount": 1,
+    "repliesCount": 0,
+    "inputUrl": "https://www.instagram.com/p/DWVPBIaDckF/",
+    "postUrl": "https://www.instagram.com/p/DWVPBIaDckF/"
+  },
+  {
+    "id": "18045678901234569",
+    "text": "Thanks for sharing this!",
+    "ownerUsername": "news_reader_mx",
+    "ownerProfilePicUrl": "https://example.com/pic3.jpg",
+    "timestamp": "2026-03-26T04:15:00.000Z",
+    "likesCount": 0,
+    "repliesCount": 0,
+    "inputUrl": "https://www.instagram.com/p/DWVV-CkiBGk/",
+    "postUrl": "https://www.instagram.com/p/DWVV-CkiBGk/"
+  }
+]

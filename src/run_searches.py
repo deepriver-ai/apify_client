@@ -17,17 +17,11 @@ DEFAULT_TASKS_CSV = "tasks.csv"
 
 def run_task(task: CrawlTask) -> None:
     """Execute a single crawl task: run actor and optionally publish."""
-    logger.info("Running task: actor=%s keywords=%s method=%s", task.actor_class, task.keywords, task.method)
+    logger.info("Running task: actor=%s search_params=%s", task.actor_class, task.search_params)
 
     actor = get_actor(task.actor_class)
     kwargs = task.to_actor_kwargs()
-
-    method_fn = getattr(actor, task.method, None)
-    if method_fn is None:
-        logger.error("Actor %s has no method '%s'", task.actor_class, task.method)
-        return
-
-    documents = method_fn(task.keywords, **kwargs)
+    documents = actor.search(task.search_params, **kwargs)
     logger.info("Got %d documents from %s (post-filter)", len(documents), task.actor_class)
 
     if task.publish:
@@ -50,7 +44,7 @@ def main(csv_path: str = DEFAULT_TASKS_CSV) -> None:
         try:
             run_task(task)
         except Exception:
-            logger.exception("Task failed: actor=%s keywords=%s", task.actor_class, task.keywords)
+            logger.exception("Task failed: actor=%s search_params=%s", task.actor_class, task.search_params)
 
     close_client()
     logger.info("All tasks complete")

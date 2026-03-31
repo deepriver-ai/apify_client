@@ -20,6 +20,7 @@ class Post(Document):
             "timestamp": item.get("timestamp"),
             "source": "Instagram",
             "body": item.get("caption"),
+            "title": item.get("caption", item.get("ownerFullName"))[:80],
             "url": item.get("url"),
             "media_urls": _collect_media_urls(item),
             "type": "Instagram",
@@ -30,8 +31,8 @@ class Post(Document):
             "n_comments": item.get("commentsCount"),
             "profile_url": profile_url,
             "post_type": item.get("type"),
-            "location_text": item.get("locationName"),
-            "location_id": item.get("locationId"),
+            "author_location_text": item.get("locationName"),
+            "author_location_id": item.get("locationId"), # TODO: need to map this to the geoid format: ISO 3166 country codes, prefixed with "_"
         })
         return cls(data=data)
 

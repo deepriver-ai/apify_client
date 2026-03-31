@@ -6,6 +6,7 @@ from typing import Any, Dict
 from dateutil import parser as dateutil_parser
 from langdetect import LangDetectException, detect
 
+from src.helpers.geocode import geocode
 from src.helpers.language import normalize_language
 
 
@@ -35,9 +36,21 @@ class Document:
             "n_comments": None,
             "profile_url": None,
             "post_type": None,
-            "location_text": None,
-            "location_id": None,
+            "author_location_text": None,
+            "author_location_id": None,
+            "location_author_formatted_name": None,
+            "location_author_geoid": None,
+            "location_author_coords": None,
+            "location_author_precision_level": None,
+            "location_author_level_1": None,
+            "location_author_level_1_id": None,
+            "location_author_level_2": None,
+            "location_author_level_2_id": None,
+            "location_author_level_3": None,
+            "location_author_level_3_id": None,
+            "location_ids": [],
             "language": None,
+            "comments": [],
         }
 
     def detect_language(self) -> str | None:
@@ -97,19 +110,31 @@ class Document:
             return True  # keep documents with unparseable timestamps
 
     def matches_location(self, country_id: str) -> bool:
-        """Return True if the document's location_id matches the given country_id prefix.
+        """Return True if any location geoid matches the given country_id prefix.
 
-        Uses geoid prefix matching: location_id ``_48416053`` matches
-        country_id ``_484`` (Mexico). Documents with no location_id or
-        non-geoid location_ids (e.g. Instagram numeric IDs) are kept.
+        Checks ``location_ids`` first (populated by geocoding). If non-empty,
+        keeps the document when ANY geoid-style ID starts with ``country_id``.
+        If ``location_ids`` is empty, falls back to ``author_location_id``
+        prefix match (set by SourcesManagement for news articles).
+
+        Documents with no location data at all are kept.
         """
         if not country_id:
             return True
-        loc_id = self.data.get("location_id")
+
+        # Primary: check location_ids (from geocoding)
+        location_ids = self.data.get("location_ids", [])
+        if location_ids:
+            geoid_style = [str(g) for g in location_ids if str(g).startswith("_")]
+            if not geoid_style:
+                return True  # no geoid-style IDs → keep
+            return any(g.startswith(country_id) for g in geoid_style)
+
+        # Fallback: check author_location_id (from SourcesManagement)
+        loc_id = self.data.get("author_location_id")
         if not loc_id:
             return True
         loc_str = str(loc_id)
-        # Only filter on geoid-style IDs (start with "_")
         if not loc_str.startswith("_"):
             return True
         return loc_str.startswith(country_id)
@@ -117,3 +142,28 @@ class Document:
     def to_final_schema(self) -> Dict[str, Any]:
         """Normalize data to the final schema. Subclasses must implement."""
         raise NotImplementedError
+
+    def add_locations(self) -> None:
+        """Geocode body text to populate location_ids and author location fields.
+
+        Uses author_location_text as geocoding context. Populates location_ids
+        with all found geoids. Sets author location fields from context group
+        only if not already set (preserves SourcesManagement data).
+        """
+        author_location_text = self.data.get("author_location_text")
+        text = self.data.get("body")
+
+        location = geocode(text, context=author_location_text)
+
+        all_locations = []
+        for k in location.keys():
+            all_locations.extend(location[k])
+
+        self.data["location_ids"] = [t["geoid"] for t in all_locations]
+
+        if "2" in location and location["2"]:
+            loc = location["2"][0]
+            for key in loc.keys():
+                target = f"location_author_{key}"
+                if self.data.get(target) is None:
+                    self.data[target] = loc[key]

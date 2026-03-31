@@ -1,3 +1,4 @@
+import os
 import pika
 from pika.exceptions import AMQPChannelError, AMQPConnectionError, AMQPError, ChannelClosed, ChannelError, ChannelWrongStateError, ConnectionClosed, ConnectionWrongStateError
 

@@ -63,7 +63,7 @@ class News(Document):
         return True
 
     def enrich_location(self, sources: SourcesManagement) -> None:
-        """Set location_text and location_id from SourcesManagement domain lookup.
+        """Set full author location fields from SourcesManagement domain lookup.
 
         Also tracks unknown sources for later review.
         """
@@ -72,8 +72,8 @@ class News(Document):
             return
         domain = sources.get_domain(url)
         location = sources.get_location(domain)
-        self.data["location_text"] = location["location_text"]
-        self.data["location_id"] = location["location_id"]
+        for key, value in location.items():
+            self.data[key] = value
         sources.check_source(url, self.data.get("source"))
 
     def to_final_schema(self) -> Dict[str, Any]:
