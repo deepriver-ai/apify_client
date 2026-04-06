@@ -25,6 +25,7 @@ class TestEmptyData:
             "location_author_level_3", "location_author_level_3_id",
             "location_ids",
             "language", "comments",
+            "author_full_name", "author_profile_bio",
         }
         assert set(data.keys()) == expected
 

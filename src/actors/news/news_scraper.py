@@ -22,6 +22,7 @@ class GoogleNewsActor(ApifyActor):
         self.sources_manager = SourcesManagement()
 
     def search(self, search_params: List[str], **kwargs) -> List[News]:
+        self.search_params = search_params
         max_articles = kwargs.get("max_articles") or kwargs.get("max_results", 30)
         timeframe = kwargs.get("timeframe", "1d")
         region_language = kwargs.get("region_language", "MX:es-419")

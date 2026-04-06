@@ -46,8 +46,12 @@ REQUESTS_TIMEOUT = 15
 MAX_RESP_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
-def fetch_html(url: str, max_retries: int = 3) -> Optional[str]:
-    """Download a URL and return its decoded HTML, or None on failure."""
+def fetch_html(url: str, max_retries: int = 3) -> tuple[Optional[str], Optional[str]]:
+    """Download a URL and return (html, final_url), or (None, None) on failure.
+
+    ``final_url`` is the URL after following any redirects, which may differ
+    from the input when the original URL is shortened or redirected.
+    """
     for attempt in range(max_retries):
         try:
             r = requests.get(url, headers=_random_headers(), timeout=REQUESTS_TIMEOUT, stream=True)
@@ -55,7 +59,7 @@ def fetch_html(url: str, max_retries: int = 3) -> Optional[str]:
 
             if int(r.headers.get("Content-Length", 0)) > MAX_RESP_SIZE:
                 logger.warning("Response too large for %s", url)
-                return None
+                return None, None
 
             body = b""
             size = 0
@@ -66,16 +70,16 @@ def fetch_html(url: str, max_retries: int = 3) -> Optional[str]:
                 size += len(chunk)
                 if size > MAX_RESP_SIZE:
                     logger.warning("Response exceeded size limit for %s", url)
-                    return None
+                    return None, None
                 body += chunk
 
             encoding = r.encoding if r.encoding else "utf-8"
-            return body.decode(encoding, errors="replace")
+            return body.decode(encoding, errors="replace"), r.url
 
         except Exception as ex:
             logger.warning("Attempt %d failed for %s: %s", attempt + 1, url, ex)
             if attempt >= max_retries - 1:
                 logger.error("All retries exhausted for %s", url)
-                return None
+                return None, None
         time.sleep(random.randint(1, 10))
-    return None
+    return None, None

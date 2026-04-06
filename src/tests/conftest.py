@@ -59,8 +59,23 @@ def mock_fetch_html():
 @pytest.fixture(autouse=True)
 def mock_geocode():
     """Mock geocode to avoid HTTP calls in tests."""
-    with patch("src.models.document.geocode", return_value={"1": [], "2": []}) as m:
+    with patch("src.models.post.geocode", return_value={"1": [], "2": []}) as m:
         yield m
+
+
+@pytest.fixture
+def sample_facebook_posts_results() -> List[Dict[str, Any]]:
+    return _load_cache("facebook_posts_sample.json")
+
+
+@pytest.fixture
+def sample_facebook_page_profiles() -> List[Dict[str, Any]]:
+    return _load_cache("facebook_page_profile_sample.json")
+
+
+@pytest.fixture
+def sample_facebook_comments() -> List[Dict[str, Any]]:
+    return _load_cache("facebook_comments_sample.json")
 
 
 @pytest.fixture
@@ -84,3 +99,5 @@ def mock_sources_manager():
     mgr.check_source.return_value = True
     mgr.save.return_value = None
     return mgr
+
+

@@ -1,0 +1,50 @@
+[
+  {
+    "text": "Excelente trabajo del municipio!",
+    "profileName": "Maria Garcia",
+    "profileId": "100012345678901",
+    "profileUrl": "https://www.facebook.com/profile.php?id=100012345678901",
+    "profilePicture": "https://example.com/pic1.jpg",
+    "date": "2026-03-28T14:30:00.000Z",
+    "likesCount": 5,
+    "repliesCount": 1,
+    "postUrl": "https://www.facebook.com/QroMunicipio/posts/pfbid02ABC123",
+    "facebookUrl": "https://www.facebook.com/QroMunicipio/posts/pfbid02ABC123"
+  },
+  {
+    "text": "Muy buena noticia para la ciudad",
+    "profileName": "Carlos Lopez",
+    "profileId": "100098765432101",
+    "profileUrl": "https://www.facebook.com/profile.php?id=100098765432101",
+    "profilePicture": "https://example.com/pic2.jpg",
+    "date": "2026-03-28T13:15:00.000Z",
+    "likesCount": 2,
+    "repliesCount": 0,
+    "postUrl": "https://www.facebook.com/QroMunicipio/posts/pfbid02ABC123",
+    "facebookUrl": "https://www.facebook.com/QroMunicipio/posts/pfbid02ABC123"
+  },
+  {
+    "text": "Gracias por compartir esta información",
+    "profileName": "Ana Martinez",
+    "profileId": "100011223344556",
+    "profileUrl": "https://www.facebook.com/profile.php?id=100011223344556",
+    "profilePicture": "https://example.com/pic3.jpg",
+    "date": "2026-03-28T12:00:00.000Z",
+    "likesCount": 0,
+    "repliesCount": 0,
+    "postUrl": "https://www.facebook.com/QroMunicipio/posts/pfbid02DEF456",
+    "facebookUrl": "https://www.facebook.com/QroMunicipio/posts/pfbid02DEF456"
+  },
+  {
+    "text": "Alguien sabe más detalles?",
+    "profileName": "Roberto Sanchez",
+    "profileId": "100099887766554",
+    "profileUrl": "https://www.facebook.com/profile.php?id=100099887766554",
+    "profilePicture": "https://example.com/pic4.jpg",
+    "date": "2026-03-28T11:45:00.000Z",
+    "likesCount": 1,
+    "repliesCount": 2,
+    "postUrl": "https://www.facebook.com/QroMunicipio/posts/pfbid02DEF456",
+    "facebookUrl": "https://www.facebook.com/QroMunicipio/posts/pfbid02DEF456"
+  }
+]

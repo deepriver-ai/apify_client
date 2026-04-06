@@ -33,7 +33,7 @@ client = OpenAI(
 tagged: Dict[Any, Dict[str, Any]] = dict()
 
 # File-based cache path
-cache_path = '/Users/oscarcuellar/ocn/media/reports/event_report/cache'
+cache_path = 'cache/llm_core'
 
 
 def _cache_file(cache_id: Any) -> str:
@@ -181,6 +181,8 @@ def llm_cached_call(
     # Build messages and call LLM
     messages = messages_builder()
     response = _call_llm_with_retry(messages)
+
+    #print('llm call messages', messages, '\n\nresponse', response, )
 
     # Parse the response
     try:

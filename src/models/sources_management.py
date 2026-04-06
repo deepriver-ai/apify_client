@@ -143,33 +143,6 @@ class SourcesManagement:
         with open(self.cache_path, "w") as f:
             json.dump(merged, f, indent=2, ensure_ascii=False)
 
-    # --- Filtering ---
-
-    def filter_by_country(self, items: List[Dict[str, Any]], country_id: str = None) -> List[Dict[str, Any]]:
-        """Filter items by country_id using the domain_country_id lookup.
-
-        Keeps items whose source domain is unknown, has no country, or matches country_id.
-        Discards items whose source domain is mapped to a different country.
-        """
-        filtered = []
-        for item in items:
-            url = item.get("link") or item.get("url")
-            if not url:
-                filtered.append(item)
-                continue
-
-            domain = self.get_domain(url)
-
-            if not self.is_known(domain):
-                filtered.append(item)
-            elif self.get_country_id(domain) is None:
-                filtered.append(item)
-            elif country_id is None or str(self.get_country_id(domain)) == country_id:
-                filtered.append(item)
-            else:
-                logger.info("Filtered out %s (domain: %s, country: %s)", url, domain, self.get_country_id(domain))
-
-        return filtered
 
 
 # Source sample schema (from MongoDB CrawlersAll collection):

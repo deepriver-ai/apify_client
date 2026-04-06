@@ -10,3 +10,4 @@ requests
 tldextract
 pymongo
 langdetect
+openpyxl

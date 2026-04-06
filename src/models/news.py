@@ -16,6 +16,19 @@ class News(Document):
     """A news article document with fetching, parsing, and schema normalization."""
 
     @classmethod
+    def from_url(cls, url: str) -> News | None:
+        """Create a News object from a URL, fetch and parse it.
+
+        Returns the News object if successful, None if fetch/parse fails.
+        """
+        news = cls()
+        news.data["url"] = url
+        news.data["type"] = "news"
+        if news.fetch_and_parse():
+            return news
+        return None
+
+    @classmethod
     def from_google_news(cls, item: Dict[str, Any]) -> News:
         """Create a News object from a raw Google News Apify result.
 
@@ -44,16 +57,20 @@ class News(Document):
             return False
 
         try:
-            html = fetch_html(url)
+            html, final_url = fetch_html(url)
+            if final_url and final_url != url:
+                logger.info("URL redirected: %s -> %s", url, final_url)
+                self.data["url"] = final_url
             if html:
-                parsed = extract_article(html, url)
+                parse_url = final_url or url
+                parsed = extract_article(html, parse_url)
                 if parsed:
                     self.data["title"] = parsed.get("title") or self.data["title"]
                     self.data["body"] = parsed.get("body") or self.data["body"]
                     self.data["author"] = parsed.get("author") or self.data["author"]
                     self.data["media_urls"] = parsed.get("media_urls") or self.data["media_urls"]
                 else:
-                    logger.warning("Could not parse article for %s", url)
+                    logger.warning("Could not parse article for %s", parse_url)
             else:
                 logger.warning("Could not fetch HTML for %s", url)
         except Exception as ex:

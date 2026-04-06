@@ -32,6 +32,9 @@ def actor():
     }
     a.sources_manager.check_source.return_value = True
     a.sources_manager.save.return_value = None
+    a.search_params = []
+    a._filter_cache = {}
+    a._save_filter_cache = MagicMock()
     return a
 
 

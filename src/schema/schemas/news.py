@@ -98,7 +98,9 @@ SOURCE_EXTRA_STATS_SCHEMA: Dict[str, Dict[str, Any]] = {
     "location_author_level_2":          {"type": str},
     "location_author_level_2_id":       {"type": str},
     "location_author_level_3":          {"type": str},
-    "location_author_level_3_id":       {"type": str}
+    "location_author_level_3_id":       {"type": str},
+    "author_full_name":                 {"type": str},
+    "author_profile_bio":               {"type": str}
 }
 
 # Schema for LocationCoords (nested object)

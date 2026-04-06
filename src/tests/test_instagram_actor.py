@@ -6,13 +6,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.actors.instagram.hashtags import InstagramHashtagActor
-from src.models.post import Post
+from src.models.instagram_post import InstagramPost
 
 
 @pytest.fixture
 def actor():
     a = InstagramHashtagActor.__new__(InstagramHashtagActor)
     a.client = MagicMock()
+    a.search_params = []
+    a._filter_cache = {}
+    a._save_filter_cache = MagicMock()
     return a
 
 
@@ -29,7 +32,7 @@ class TestSearchCreatesDocuments:
     def test_creates_post_objects(self, actor, sample_instagram_results):
         with patch.object(actor, "run_actor", return_value=sample_instagram_results):
             results = actor.search(["totalenergies"])
-        assert all(isinstance(r, Post) for r in results)
+        assert all(isinstance(r, InstagramPost) for r in results)
         assert len(results) > 0
 
     def test_params_sent_to_apify(self, actor, sample_instagram_results):

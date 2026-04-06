@@ -81,7 +81,8 @@ def _fill_from_newspaper(result: Dict[str, Any], html: str, url: str) -> None:
         import newspaper
 
         article = newspaper.Article(url=url)
-        article.set_html(html)
+        #article.set_html(html)  # Older newspaper version?
+        article.html = html
         article.parse()
 
         if not _field_ok(result, "title") and article.title:

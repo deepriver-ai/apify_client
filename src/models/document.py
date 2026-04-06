@@ -6,7 +6,6 @@ from typing import Any, Dict
 from dateutil import parser as dateutil_parser
 from langdetect import LangDetectException, detect
 
-from src.helpers.geocode import geocode
 from src.helpers.language import normalize_language
 
 
@@ -36,6 +35,8 @@ class Document:
             "n_comments": None,
             "profile_url": None,
             "post_type": None,
+            "author_full_name": None,
+            "author_profile_bio": None,
             "author_location_text": None,
             "author_location_id": None,
             "location_author_formatted_name": None,
@@ -143,27 +144,6 @@ class Document:
         """Normalize data to the final schema. Subclasses must implement."""
         raise NotImplementedError
 
-    def add_locations(self) -> None:
-        """Geocode body text to populate location_ids and author location fields.
-
-        Uses author_location_text as geocoding context. Populates location_ids
-        with all found geoids. Sets author location fields from context group
-        only if not already set (preserves SourcesManagement data).
-        """
-        author_location_text = self.data.get("author_location_text")
-        text = self.data.get("body")
-
-        location = geocode(text, context=author_location_text)
-
-        all_locations = []
-        for k in location.keys():
-            all_locations.extend(location[k])
-
-        self.data["location_ids"] = [t["geoid"] for t in all_locations]
-
-        if "2" in location and location["2"]:
-            loc = location["2"][0]
-            for key in loc.keys():
-                target = f"location_author_{key}"
-                if self.data.get(target) is None:
-                    self.data[target] = loc[key]
+    def enrich_location(self, **kwargs) -> None:
+        """Enrich document with location data. Subclasses must implement."""
+        raise NotImplementedError

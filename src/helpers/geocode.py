@@ -1,7 +1,14 @@
+import logging
+import time
 import requests
 import json
 import os
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+GEOCODE_MAX_RETRIES = 3
+GEOCODE_RETRY_SLEEP = 5  # seconds between retries
 
 NLP_URL = os.getenv('NLP_URL')
 GEOCODING_URL = os.getenv('GEOCODING_URL')
@@ -61,17 +68,25 @@ def format_mentions(main, context=None):
 
 def geocode(text, context=None):
     '''
-    dictionary of locations for each context group (text and context): each contains a list of all locations mentioned in the text
+    dictionary of locations for each context group (text and context): each contains a list of all locations mentioned in the text.
+    Returns {"error": <message>} if the geocoding service fails after max retries.
     '''
+    for attempt in range(1, GEOCODE_MAX_RETRIES + 1):
+        try:
+            arguments = {'mentions': format_mentions(text, context)}
+            response = requests.post(GEOCODING_URL,
+                                     json=arguments,
+                                     headers={'Content-Type': 'application/json'},
+                                     timeout=10)
+            response.raise_for_status()
+            return json.loads(response.text)
+        except Exception as ex:
+            logger.warning("Geocoding attempt %d/%d failed: %s", attempt, GEOCODE_MAX_RETRIES, ex)
+            if attempt < GEOCODE_MAX_RETRIES:
+                time.sleep(GEOCODE_RETRY_SLEEP)
 
-    arguments = {'mentions': format_mentions(text, context)}
-
-    response = requests.post(GEOCODING_URL,
-                             json=arguments,
-                             headers={'Content-Type': 'application/json'},
-                             timeout=10)
-
-    return json.loads(response.text)
+    logger.warning("Geocoding service unavailable after %d attempts, skipping location enrichment", GEOCODE_MAX_RETRIES)
+    return {"error": f"Geocoding failed after {GEOCODE_MAX_RETRIES} attempts"}
 
 '''
 geocode sample response:
