@@ -79,6 +79,16 @@ def sample_facebook_comments() -> List[Dict[str, Any]]:
 
 
 @pytest.fixture
+def sample_instagram_profile_posts_results() -> List[Dict[str, Any]]:
+    return _load_cache("instagram_profile_posts_sample.json")
+
+
+@pytest.fixture
+def sample_instagram_video_downloads() -> List[Dict[str, Any]]:
+    return _load_cache("instagram_video_download_sample.json")
+
+
+@pytest.fixture
 def mock_sources_manager():
     mgr = MagicMock()
     mgr.get_domain.return_value = "example.com"

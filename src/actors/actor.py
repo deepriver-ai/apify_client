@@ -45,10 +45,10 @@ class ApifyActor:
         2. ``_filter_date``        — cheap, timestamp available from API
         3. ``_enrich_content``     — expensive (HTTP fetch + parse for news)
         4. ``_filter_language``    — cheap, needs body text from step 3
-        5. ``_enrich_location``    — potentially expensive (geocoding for social)
-        6. ``_filter_location``    — cheap, geoid prefix match
-        7. ``_filter_llm``         — LLM-based filtering (batched, expensive)
-        8. ``_enrich_user_author`` — user profile enrichment (bio, followers)
+        5. ``_enrich_user_author`` — user profile enrichment (bio, followers)
+        6. ``_enrich_location``    — potentially expensive (geocoding for social)
+        7. ``_filter_location``    — cheap, geoid prefix match
+        8. ``_filter_llm``         — LLM-based filtering (batched, expensive)
         9. ``_enrich_comments``    — comments enrichment
 
     Subclasses override individual stages to push filters to the API level
@@ -105,10 +105,10 @@ class ApifyActor:
         documents = self._filter_date(documents, **kwargs)
         documents = self._enrich_content(documents, **kwargs)
         documents = self._filter_language(documents, **kwargs)
+        documents = self._enrich_user_author(documents, **kwargs)
         documents = self._enrich_location(documents, **kwargs)
         documents = self._filter_location(documents, **kwargs)
         documents = self._filter_llm(documents, **kwargs)
-        documents = self._enrich_user_author(documents, **kwargs)
         documents = self._filter_llm(documents, snippet_max_len=2500, **kwargs)
         documents = self._enrich_comments(documents, **kwargs)
 

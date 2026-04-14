@@ -13,6 +13,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_PATH = "cache/unknown_sources.json"
 
+_BLACKLISTED_DOMAINS = {
+    "youtube.com", "youtu.be",
+    "x.com", "twitter.com",
+    "facebook.com", "fb.com",
+    "instagram.com",
+    "linkedin.com",
+    "tiktok.com",
+    "threads.net",
+    "reddit.com",
+    "pinterest.com",
+    "whatsapp.com", "wa.me",
+    "t.me",
+}
+
 
 def _load_sources() -> List[Dict[str, Any]]:
     """Fetch all sources from MongoDB CrawlersAll collection."""
@@ -73,6 +87,15 @@ class SourcesManagement:
     def __init__(self, cache_path: str = DEFAULT_CACHE_PATH):
         self.cache_path = cache_path
         self._unknown: List[Dict[str, str]] = []
+
+    # --- Blacklist ---
+
+    def is_blacklisted(self, url: str) -> bool:
+        """Return True if the URL's domain is a known non-news platform."""
+        domain = get_domain(url)
+        if not domain:
+            return False
+        return any(domain == bl or domain.endswith("." + bl) for bl in _BLACKLISTED_DOMAINS)
 
     # --- Source lookups ---
 

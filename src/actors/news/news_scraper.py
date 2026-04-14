@@ -5,7 +5,6 @@ from typing import Any, Dict, List
 
 from src.actors.actor import ApifyActor
 from src.models.news import News
-from src.models.sources_management import SourcesManagement
 
 # Google News Scraper
 # https://apify.com/gNuQaPoeEXpEyrp6d/google-news-scraper (actor ID: 3Z6SK7F2WoPU3t2sg)
@@ -16,10 +15,6 @@ logger = logging.getLogger(__name__)
 class GoogleNewsActor(ApifyActor):
 
     actor_id = "3Z6SK7F2WoPU3t2sg"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.sources_manager = SourcesManagement()
 
     def search(self, search_params: List[str], **kwargs) -> List[News]:
         self.search_params = search_params
@@ -66,6 +61,6 @@ class GoogleNewsActor(ApifyActor):
     def _enrich_location(self, documents: List, **kwargs) -> List:
         """Set location from SourcesManagement domain lookup and track unknown sources."""
         for doc in documents:
-            doc.enrich_location(self.sources_manager)
-        self.sources_manager.save()
+            doc.enrich_location()
+        News.sources_manager.save()
         return documents

@@ -26,6 +26,7 @@ class TestEmptyData:
             "location_ids",
             "language", "comments",
             "author_full_name", "author_profile_bio",
+            "video_filename",
         }
         assert set(data.keys()) == expected
 

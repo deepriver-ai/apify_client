@@ -140,6 +140,7 @@ All data fetched from Apify is first translated into this common intermediate sc
 | `location_ids` | List of geoids from geocoding (used by `matches_location()` before falling back to `author_location_id`) |
 | `language` | Detected language as ISO 639-1 code (e.g. `es`, `en`). Set by `detect_language()` or by actor from metadata |
 | `comments` | List of comment dicts, each with `comment_text`, `comment_author`, `comment_timestamp`, `comment_likes`. Empty list if comments not scraped |
+| `video_filename` | Local path to downloaded video file (set by `InstagramProfilePostsActor._download_video()`). Default directory: `cache/media/instagram` |
 
 Final normalization uses the schema engine in `src/schema/` (see `src/schema/readme_schema.md`):
 
@@ -212,6 +213,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 
 - **GoogleNewsActor**: `timeframe`, `region_language`, `decode_urls`, `extract_descriptions`, `extract_images`, `enrich`
 - **InstagramHashtagActor**: `keyword_search`, `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
+- **InstagramProfilePostsActor**: `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `video_dir` (default `cache/media/instagram`), `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 - **FacebookPagePostsActor**: `fetch_attached_url`, `download_images`, `download_video`, `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 
 ## Processing pipeline (`ApifyActor.process_documents`)
@@ -267,6 +269,7 @@ Maps string keys to actor classes:
 |---|---|
 | `google_news` | `GoogleNewsActor` |
 | `instagram_hashtags` | `InstagramHashtagActor` |
+| `instagram_profile_posts` | `InstagramProfilePostsActor` |
 | `facebook_page_posts` | `FacebookPagePostsActor` |
 
 
@@ -343,6 +346,7 @@ The base class provides `process_documents(docs, **kwargs)` — a staged pipelin
 Current actors:
 - **`news/news_scraper.py`** — `GoogleNewsActor` (actor `3Z6SK7F2WoPU3t2sg`)
 - **`instagram/hashtags.py`** — `InstagramHashtagActor` (actor `reGe1ST3OBgYZSsZJ`)
+- **`instagram/profile_posts.py`** — `InstagramProfilePostsActor` (actor `shu8hvrXbJbY3Eb9W`). Scrapes posts from profile URLs, downloads videos via `igview-owner/instagram-video-downloader` with URL-hash caching to `cache/media/instagram/`
 - **`facebook/posts.py`** — `FacebookPagePostsActor` (actor `apify/facebook-posts-scraper`)
 - **`facebook/profiles.py`** — `FacebookProfileActor`, utility class wrapping `apify/facebook-pages-scraper`. Used internally by `FacebookPagePostsActor` for author enrichment. Not in the actor registry
 - **`facebook/comments.py`** — `FacebookCommentsActor`, utility class wrapping `apify/facebook-comments-scraper`. Used internally by `FacebookPagePostsActor` for comment enrichment. Not in the actor registry

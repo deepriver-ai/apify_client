@@ -240,3 +240,120 @@ def get_instagram_comments(direct_urls, resultsLimit=15):
     '''
 
     return results
+
+def download_ig_videos(urls, target_dir, quality='720p'):
+    """
+    Downloads Instagram videos (shahidirfan/Instagram-Video-Downloader) and
+    returns standardized post metadata.
+
+    Args:
+        urls (list[str]): Instagram post URLs (videos/reels).
+        target_dir (str): Local directory where video files will be saved.
+        quality (str): '720p', '1080p', 'best', or 'audio_only'.
+
+    Returns:
+        list[dict]: Standardized post records matching the repo schema:
+            ['id', 'caption', 'created_at', 'url', 'likes', 'views',
+             'n_comments', 'transcript', 'authorName', 'profileUrl', 'followers']
+            Plus 'local_video_path' with the path to the downloaded file (or None).
+    """
+    os.makedirs(target_dir, exist_ok=True)
+
+    run_input = {
+        "urls": ','.join(urls),
+        "downloadMode": "metadata_only",
+        "maxItems": len(urls),
+        "quality": quality,
+    }
+
+    run = client.actor("shahidirfan/Instagram-Video-Downloader").call(run_input=run_input)
+
+    results = []
+    for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+        url = item.get("url") or item.get("postUrl")
+        h = _url_hash(url) if url else _url_hash(item.get("id", ""))
+
+        post_id = item.get("id") or item.get("shortcode") or item.get("post_id") or item.get("video_id")
+        download_url = item.get("downloadUrl") or item.get("download_url") or item.get("videoUrl")
+
+        local_path = _video_exists(target_dir, h)
+        if not local_path and download_url:
+            try:
+                local_path = _download_video(download_url, target_dir, h)
+            except Exception as e:
+                print(f"Failed to download video for {post_id}: {e}")
+
+        results.append({
+            "id": post_id,
+            "caption": item.get("caption") or item.get("title") or item.get("description"),
+            "created_at": item.get("timestamp") or item.get("created_at"),
+            "url": url,
+            "likes": item.get("likes") or item.get("likesCount"),
+            "views": item.get("views") or item.get("videoViewCount"),
+            "n_comments": item.get("comments") or item.get("commentsCount"),
+            "transcript": None,
+            "authorName": item.get("author") or item.get("username") or item.get("ownerUsername"),
+            "profileUrl": item.get("profileUrl") or item.get("ownerProfileUrl"),
+            "followers": item.get("followers") or item.get("followersCount"),
+            "local_video_path": local_path,
+        })
+
+    return results
+
+def download_ig_videos_v2(urls, target_dir):
+    """
+    Downloads Instagram videos (igview-owner/instagram-video-downloader) and
+    returns standardized post metadata.
+
+    Args:
+        urls (list[str]): Instagram post URLs (videos/reels).
+        target_dir (str): Local directory where video files will be saved.
+
+    Returns:
+        list[dict]: Standardized post records matching the repo schema:
+            ['id', 'caption', 'created_at', 'url', 'likes', 'views',
+             'n_comments', 'transcript', 'authorName', 'profileUrl', 'followers']
+            Plus 'local_video_path' with the path to the downloaded file (or None).
+    """
+    os.makedirs(target_dir, exist_ok=True)
+
+    run_input = {
+        "instagram_urls": urls,
+    }
+
+    run = client.actor("igview-owner/instagram-video-downloader").call(run_input=run_input)
+
+    results = []
+    for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+        url = item.get("source_url") or item.get("input_url")
+        h = _url_hash(url) if url else _url_hash(item.get("shortcode", ""))
+
+        download_url = item.get("download_url")
+        ext = item.get("file_extension") or "mp4"
+
+        local_path = _video_exists(target_dir, h)
+        if not local_path and download_url:
+            try:
+                local_path = _download_video(download_url, target_dir, h, ext=ext)
+            except Exception as e:
+                print(f"Failed to download video for {item.get('shortcode')}: {e}")
+
+        username = item.get("username")
+        results.append({
+            "id": item.get("shortcode"),
+            "caption": item.get("title"),
+            "created_at": item.get("taken_at"),
+            "url": url,
+            "likes": item.get("like_count"),
+            "views": None,
+            "n_comments": item.get("comment_count"),
+            "transcript": None,
+            "authorName": username,
+            "profileUrl": f"https://www.instagram.com/{username}/" if username else None,
+            "followers": None,
+            "local_video_path": local_path,
+            "comments": item.get("comments"),
+            "thumbnail_url": item.get("thumbnail_url"),
+        })
+
+    return results

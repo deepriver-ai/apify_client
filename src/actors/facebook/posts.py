@@ -8,7 +8,6 @@ from src.actors.actor import ApifyActor, PERIOD_DAYS
 from src.actors.facebook.comments import FacebookCommentsActor
 from src.actors.facebook.profiles import FacebookProfileActor
 from src.models.facebook_post import FacebookPost, _extract_facebook_page_name
-from src.models.sources_management import SourcesManagement
 
 # Facebook Posts Scraper
 # https://apify.com/apify/facebook-posts-scraper
@@ -21,10 +20,6 @@ class FacebookPagePostsActor(ApifyActor):
     Works for pages urls
     '''
     actor_id = "apify/facebook-posts-scraper"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.sources_manager = SourcesManagement()
 
     def search(self, search_params: List[str], **kwargs) -> List[FacebookPost]:
         '''
@@ -53,14 +48,16 @@ class FacebookPagePostsActor(ApifyActor):
         if newer_than:
             run_input["onlyPostsNewerThan"] = newer_than
 
-        #raw_results = self.run_actor(run_input)
+        raw_results = self.run_actor(run_input)
         import pickle
-        #with open('/Users/oscarcuellar/Downloads/raw_fbpage_results_observador_test.pkl', 'wb') as f:
-        #    pickle.dump(raw_results, f)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        task_id = kwargs.get("task_id")
+        with open(f'/Users/oscarcuellar/Downloads/raw_fbpage_results_{task_id}_{ts}.pkl', 'wb') as f:
+            pickle.dump(raw_results, f)
 
         
-        with open('/Users/oscarcuellar/Downloads/raw_fbpage_results_observador_test.pkl', 'rb') as f:
-            raw_results = pickle.load(f)
+        #with open('/Users/oscarcuellar/Downloads/raw_fbpage_results_5_20260406_230451.pkl', 'rb') as f:
+        #    raw_results = pickle.load(f)
 
         posts = [FacebookPost.from_facebook(item) for item in raw_results]
 
@@ -74,7 +71,7 @@ class FacebookPagePostsActor(ApifyActor):
         """
         if kwargs.get("fetch_attached_url"):
             for doc in documents:
-                doc.fetch_attached_url(self.sources_manager)
+                doc.fetch_attached_url()
         if kwargs.get("download_images"):
             self._download_images(documents, **kwargs)
         if kwargs.get("download_video"):
@@ -155,12 +152,9 @@ class FacebookPagePostsActor(ApifyActor):
         apply cached stats first, collect stale profiles, bulk scrape,
         map results back to posts.
         """
-        if not kwargs.get("enrich_followers"):
-            return documents
-
         max_age_days = kwargs.get("stats_max_age_days", 90)
 
-        # Apply cached stats first, collect profiles that need scraping
+        # Always apply cached stats, even if enrich_followers is not set
         profiles_to_scrape: Dict[str, str] = {}  # profile_url → page_name
         for doc in documents:
             doc.apply_cached_user_author()
@@ -170,8 +164,11 @@ class FacebookPagePostsActor(ApifyActor):
                 if page_name:
                     profiles_to_scrape[profile_url] = page_name
 
-        if not profiles_to_scrape:
-            logger.info("All %d profiles have fresh stats, skipping scraper", len(documents))
+        if not profiles_to_scrape or not kwargs.get("enrich_followers"):
+            if not kwargs.get("enrich_followers"):
+                logger.info("enrich_followers not set, applied cached stats only for %d posts", len(documents))
+            else:
+                logger.info("All %d profiles have fresh stats, skipping scraper", len(documents))
             return documents
 
         # Deduplicate page URLs and bulk scrape

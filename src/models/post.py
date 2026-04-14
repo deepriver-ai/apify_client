@@ -69,22 +69,21 @@ class Post(Document):
         self._raw = raw or {}
         self.attached_news = None
 
-    def fetch_attached_url(self, sources_manager: Optional[Any] = None) -> None:
+    def fetch_attached_url(self) -> None:
         """Fetch and parse the first external URL found in the post body.
 
         Creates a News object from the URL, appends its article text to the
         post body tagged as attached_url_text, and stores the News object in
         ``self.attached_news`` for later access (e.g. publishing to RabbitMQ).
 
-        If the article source has a location in SourcesManagement and the post
-        has no author location set, copies the source's location fields.
+        Location fields from the article's source (via SourcesManagement) are
+        copied to the post when not already set.
         """
         from src.models.news import News
-        from src.helpers.str_fn import get_domain
 
         body = self.data.get("body") or ""
 
-        # Prefer explicit link from raw API response (e.g. Facebook 'link' field)
+        # Prefer explicit link from raw API response (e.g. Facebook 'link' field) TODO: move to FacebookPagePosts
         url = self._raw.get("link")
         if not url:
             own_url = self.data.get("url")
@@ -104,13 +103,11 @@ class Post(Document):
         if article_body:
             self.data["body"] = body + "\n\n attached_url_text: " + article_body
 
-        if sources_manager:
-            domain = get_domain(url)
-            if domain and sources_manager.is_known(domain):
-                location = sources_manager.get_location(domain)
-                for key, value in location.items():
-                    if value is not None and self.data.get(key) is None:
-                        self.data[key] = value
+        # Copy location fields from the News object (populated by News.from_url via SourcesManagement)
+        for key, value in news.data.items():
+            if key.startswith("location_author") or key in ("author_location_text", "author_location_id"):
+                if value is not None and self.data.get(key) is None:
+                    self.data[key] = value
 
     def enrich_location(self, **kwargs) -> None:
         """Geocode body text to populate location_ids and author location fields.
@@ -200,4 +197,23 @@ class Post(Document):
 
     def to_final_schema(self) -> Dict[str, Any]:
         """Normalize to the MessageWrapper schema."""
-        return normalize_record(self.data, "MessageWrapper")
+        
+        # Fallback fields generation
+
+        if not self.data.get("body"):
+            self.data["body"] = f"{self.data.get('author')} - {self.data.get('url')}"
+        
+        # Fallback title generation if not present
+        if not self.data.get("title"):
+            body = self.data.get("body") or ""
+            if body:
+                self.data["title"] = body.replace("\n", " ").replace("attached_url_text: ", "")[:80].strip()
+            else:
+                author = self.data.get("author") or "Unknown"
+                url = self.data.get("url") or ""
+                self.data["title"] = f"{author} - {url}" if url else author
+        try:
+            return normalize_record(self.data, "MessageWrapper")
+        except Exception as e:
+            logger.error("Error normalizing post %s: %s", self.data.get("url"), e)
+            return None

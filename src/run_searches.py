@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
+from datetime import datetime
 
 from src.actors import get_actor
 from src.helpers.rabbitmq import close_client, publish
@@ -25,7 +27,7 @@ if __name__ == "__main__":
     logger.info("Loaded %d enabled tasks from %s", len(tasks), xlsx_path)
 
     for task in tasks:
-
+        logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
             actor = get_actor(task.actor_class)
             kwargs = task.to_actor_kwargs()
@@ -37,8 +39,22 @@ if __name__ == "__main__":
                     final = doc.to_final_schema()
                     publish(json.dumps(final))
                 logger.info("Published %d documents to RabbitMQ", len(documents))
+
             else:
-                logger.info("Publish disabled for this task, skipping RabbitMQ")
+                runs_dir = os.path.join("cache", "runs")
+                os.makedirs(runs_dir, exist_ok=True)
+                search_label = task.task_id
+
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{task.actor_class}_id_{search_label}_{ts}.json"
+
+                filepath = os.path.join(runs_dir, filename)
+                results = [doc.to_final_schema() for doc in documents]
+                
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2, default=str)
+                
+                logger.info("Saved %d documents to %s", len(documents), filepath)
 
         except Exception:
             logger.exception("Task failed: actor=%s search_params=%s", task.actor_class, task.search_params)

@@ -1,3 +1,4 @@
-actor_class,search_params,country_id,language,min_date,period,max_results,enabled,publish,get_comments,max_comments,actor_params
-google_news,"totalenergies",_484,es,2026-03-15,,30,true,true,false,,"{""timeframe"":""1d"",""enrich"":true}"
-instagram_hashtags,"totalenergies",_484,es,,,50,true,true,false,15,"{""keyword_search"":false}"
+task_id,actor_class,search_params,country_id,language,min_date,period,max_results,enabled,publish,get_comments,max_comments,not_keywords,llm_filter_condition,override_filters,enrich_followers,fetch_attached_url,actor_params
+news_te,google_news,"totalenergies",_484,es,,d,30,true,true,false,,,,,,,"{""timeframe"":""1d"",""enrich"":true}"
+ig_te,instagram_hashtags,"totalenergies",_484,es,,w,50,true,true,false,15,,"Elimina las publicaciones que NO estén relacionadas con lubricantes automotrices, aceites automotrices o mecánica automotriz. Elimina las publicaciones donde se pueda inferir que no se refieren a México",,true,false,"{""keyword_search"":false}"
+ig_va,instagram_hashtags,"valvoline",_484,es,,w,50,true,true,false,15,,"Elimina las publicaciones que NO estén relacionadas con lubricantes automotrices, aceites automotrices o mecánica automotriz. Elimina las publicaciones donde se pueda inferir que no se refieren a México",,true,false,"{""keyword_search"":false}"

@@ -23,16 +23,14 @@ class FacebookPost(Post):
         post_type = _infer_facebook_post_type(media, url)
         media_urls = _collect_facebook_media_urls(media)
 
-        # Extract timestamp from video media publish_time (unix epoch) if available
+        # Extract timestamp (unix epoch) if available
         timestamp = None
-        for m in media:
-            pt = m.get("publish_time")
-            if pt:
-                try:
-                    timestamp = datetime.utcfromtimestamp(int(pt)).isoformat()
-                except (ValueError, TypeError, OSError):
-                    pass
-                break
+        raw_ts = item.get("timestamp")
+        if raw_ts is not None:
+            try:
+                timestamp = datetime.utcfromtimestamp(int(raw_ts)).isoformat()
+            except (ValueError, TypeError, OSError):
+                pass
 
         body = item.get("text") or ""
 

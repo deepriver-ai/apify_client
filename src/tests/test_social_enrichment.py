@@ -65,25 +65,25 @@ class TestFetchAttachedUrl:
         assert post.data["body"] == original_body
         assert post.attached_news is None
 
-    def test_sets_location_from_sources_manager(self):
+    def test_sets_location_from_news_data(self):
+        """Location fields are copied from the News object populated by News.from_url."""
         post = Post()
         post.data["body"] = "Read more: https://example.com/article"
         post.data["url"] = "https://instagram.com/p/123"
 
         mock_news = MagicMock()
-        mock_news.data = {"body": "Article text"}
-
-        sources = MagicMock()
-        sources.is_known.return_value = True
-        sources.get_location.return_value = {
+        mock_news.data = {
+            "body": "Article text",
             "author_location_text": "Mexico City",
             "author_location_id": "_48416053",
+            "location_author_geoid": "_48416053",
         }
 
         with patch("src.models.news.News.from_url", return_value=mock_news):
-            post.fetch_attached_url(sources_manager=sources)
+            post.fetch_attached_url()
 
         assert post.data["author_location_text"] == "Mexico City"
+        assert post.data["author_location_id"] == "_48416053"
 
     def test_does_not_overwrite_existing_location(self):
         post = Post()
@@ -92,16 +92,13 @@ class TestFetchAttachedUrl:
         post.data["author_location_text"] = "Existing Location"
 
         mock_news = MagicMock()
-        mock_news.data = {"body": "Article text"}
-
-        sources = MagicMock()
-        sources.is_known.return_value = True
-        sources.get_location.return_value = {
+        mock_news.data = {
+            "body": "Article text",
             "author_location_text": "New Location",
         }
 
         with patch("src.models.news.News.from_url", return_value=mock_news):
-            post.fetch_attached_url(sources_manager=sources)
+            post.fetch_attached_url()
 
         assert post.data["author_location_text"] == "Existing Location"
 

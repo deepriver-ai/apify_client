@@ -52,6 +52,7 @@ class Document:
             "location_ids": [],
             "language": None,
             "comments": [],
+            "video_filename": None,
         }
 
     def detect_language(self) -> str | None:

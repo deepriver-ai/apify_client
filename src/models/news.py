@@ -15,18 +15,38 @@ logger = logging.getLogger(__name__)
 class News(Document):
     """A news article document with fetching, parsing, and schema normalization."""
 
+    sources_manager = SourcesManagement()
+
     @classmethod
     def from_url(cls, url: str) -> News | None:
         """Create a News object from a URL, fetch and parse it.
 
-        Returns the News object if successful, None if fetch/parse fails.
+        Skips blacklisted domains. Tracks unknown sources and copies source
+        location fields into the News data when available.
+
+        Returns the News object if successful, None if fetch/parse fails or blacklisted.
         """
+        if cls.sources_manager.is_blacklisted(url):
+            logger.info("Skipping blacklisted URL: %s", url)
+            return None
+
         news = cls()
         news.data["url"] = url
         news.data["type"] = "news"
-        if news.fetch_and_parse():
-            return news
-        return None
+        if not news.fetch_and_parse():
+            return None
+
+        # Track source and copy location fields from SourcesManagement
+        final_url = news.data.get("url") or url
+        domain = cls.sources_manager.get_domain(final_url)
+        cls.sources_manager.check_source(final_url, news.data.get("source"))
+        if domain:
+            location = cls.sources_manager.get_location(domain)
+            for key, value in location.items():
+                if value is not None and news.data.get(key) is None:
+                    news.data[key] = value
+
+        return news
 
     @classmethod
     def from_google_news(cls, item: Dict[str, Any]) -> News:
@@ -79,7 +99,7 @@ class News(Document):
 
         return True
 
-    def enrich_location(self, sources: SourcesManagement) -> None:
+    def enrich_location(self, **kwargs) -> None:
         """Set full author location fields from SourcesManagement domain lookup.
 
         Also tracks unknown sources for later review.
@@ -87,11 +107,11 @@ class News(Document):
         url = self.data.get("url")
         if not url:
             return
-        domain = sources.get_domain(url)
-        location = sources.get_location(domain)
+        domain = self.sources_manager.get_domain(url)
+        location = self.sources_manager.get_location(domain)
         for key, value in location.items():
             self.data[key] = value
-        sources.check_source(url, self.data.get("source"))
+        self.sources_manager.check_source(url, self.data.get("source"))
 
     def to_final_schema(self) -> Dict[str, Any]:
         """Normalize to the MessageWrapper schema."""
