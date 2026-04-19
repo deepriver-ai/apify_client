@@ -81,7 +81,9 @@ def parse_datetime(value: Any) -> Optional[datetime]:
         if not s:
             ret = None
         try:
-            ret = parse_datetime_str(s, dayfirst=True)
+            # TODO: if format like "2026-04-14T12:00:00.000Z" parses wrong day-month when dayfirst=True, 
+            # if format is "14/04/2026" parses wrong month-day when dayfirst=False
+            ret = parse_datetime_str(s, dayfirst=False)
         except Exception:
             try:
                 ret = parse_datetime_str(s)

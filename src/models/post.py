@@ -203,6 +203,8 @@ class Post(Document):
         if not self.data.get("body"):
             self.data["body"] = f"{self.data.get('author')} - {self.data.get('url')}"
         
+        self.data["fb_likes"] = self.data.get("likes")
+        
         # Fallback title generation if not present
         if not self.data.get("title"):
             body = self.data.get("body") or ""

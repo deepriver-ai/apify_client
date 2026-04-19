@@ -26,6 +26,7 @@ if __name__ == "__main__":
     tasks = load_tasks(xlsx_path)
     logger.info("Loaded %d enabled tasks from %s", len(tasks), xlsx_path)
 
+    tasks = tasks[5:]  # ORIZABA
     for task in tasks:
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
@@ -37,7 +38,7 @@ if __name__ == "__main__":
             if task.publish:
                 for doc in documents:
                     final = doc.to_final_schema()
-                    publish(json.dumps(final))
+                    publish(json.dumps(final, default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o)))
                 logger.info("Published %d documents to RabbitMQ", len(documents))
 
             else:

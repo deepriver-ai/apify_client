@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
@@ -16,8 +16,9 @@ class FacebookPost(Post):
         url = item.get("url", "")
 
         # Extract page name from URL (e.g., "QroMunicipio" from facebook.com/QroMunicipio/...)
-        page_name = _extract_facebook_page_name(url)
-        profile_url = f"https://www.facebook.com/{page_name}/" if page_name else None
+        #page_name = _extract_facebook_page_name(url)
+        page_name = item.get('user', {}).get('name') or item.get("pageName")
+        profile_url = item.get('facebookUrl') or (f"https://www.facebook.com/{page_name}/" if page_name else None)
 
         media = item.get("media", [])
         post_type = _infer_facebook_post_type(media, url)
@@ -28,7 +29,7 @@ class FacebookPost(Post):
         raw_ts = item.get("timestamp")
         if raw_ts is not None:
             try:
-                timestamp = datetime.utcfromtimestamp(int(raw_ts)).isoformat()
+                timestamp = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc).isoformat()
             except (ValueError, TypeError, OSError):
                 pass
 
@@ -37,12 +38,12 @@ class FacebookPost(Post):
         data = cls._empty_data()
         data.update({
             "timestamp": timestamp,
-            "source": page_name or "Facebook",
+            "source": page_name or "Facebook", #"Facebook",
             "body": body,
             "title": (item.get("text") or "")[:80] or None,
             "url": url,
             "media_urls": media_urls,
-            "type": "Facebook",
+            "type": "news",  # Has to be news as -for now- it is saved as a news object in Elasticsearch
             "author": page_name,
             "likes": item.get("likes"),
             "shares": item.get("shares"),

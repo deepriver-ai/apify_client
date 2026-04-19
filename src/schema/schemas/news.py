@@ -47,6 +47,7 @@ NEWS_SCHEMA: Dict[str, Dict[str, Any]] = {
     "column_name": {"type": str},
     "column_author": {"type": str},
     "media_videos": {"type": str},
+    "fb_likes": {"type": int},
     "source": {
         "type": str,
         "required": True  # Required if source not found
