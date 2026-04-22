@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import re
 
 from typing import Any, Callable, Dict, List, Optional, Type
 from ast import literal_eval
@@ -9,6 +10,17 @@ from datetime import datetime
 
 from dateutil.parser import parse as parse_datetime_str
 from src.helpers.str_fn import _is_valid_url, _is_null
+
+_GENERIC_RE = re.compile(r"^(List)\[(.+)\]$")
+
+
+def extract_list_object_type(field_type: Any) -> Optional[str]:
+    """Return the inner type name if field_type is 'List[Name]', else None."""
+    if isinstance(field_type, str):
+        m = _GENERIC_RE.match(field_type)
+        if m:
+            return m.group(2)
+    return None
 
 local_tz = datetime.now().astimezone().tzinfo
 

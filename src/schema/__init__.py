@@ -4,9 +4,10 @@ from .schemas.source import (
     LOCATION_COORDS_SCHEMA
 )
 from .schemas.news import (
-    NEWS_SCHEMA, 
-    SOURCE_EXTRA_SCHEMA, 
-    SOURCE_EXTRA_STATS_SCHEMA, 
+    NEWS_SCHEMA,
+    COMMENT_SCHEMA,
+    SOURCE_EXTRA_SCHEMA,
+    SOURCE_EXTRA_STATS_SCHEMA,
     SUPPLIER_SCHEMA,
     MESSAGE_WRAPPER_SCHEMA
 )
@@ -30,6 +31,7 @@ SCHEMA = {
     "SourceStats": SOURCE_STATS_SCHEMA,
     "LocationCoords": LOCATION_COORDS_SCHEMA,
     "News": NEWS_SCHEMA,
+    "Comment": COMMENT_SCHEMA,
     "SourceExtra": SOURCE_EXTRA_SCHEMA,
     "SourceExtraStats": SOURCE_EXTRA_STATS_SCHEMA,
     "Supplier": SUPPLIER_SCHEMA,
@@ -58,8 +60,9 @@ __all__ = [
     "SOURCE_SCHEMA",
     "SOURCE_STATS_SCHEMA",
     "NEWS_SCHEMA",
-    "SOURCE_EXTRA_SCHEMA", 
-    "SOURCE_EXTRA_STATS_SCHEMA", 
+    "COMMENT_SCHEMA",
+    "SOURCE_EXTRA_SCHEMA",
+    "SOURCE_EXTRA_STATS_SCHEMA",
     "SUPPLIER_SCHEMA",
     "MESSAGE_WRAPPER_SCHEMA",
     "Parser",

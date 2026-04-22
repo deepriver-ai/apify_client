@@ -208,7 +208,6 @@ class FacebookPagePostsActor(ApifyActor):
 
         max_comments = kwargs.get("max_comments", 15)
         post_urls = [doc.data.get("url") for doc in documents if doc.data.get("url")]
-        post_urls = [doc.data.get("url") for doc in documents if doc.data.get("n_comments") and doc.data.get("n_comments") > 0]
         if not post_urls:
             return documents
 

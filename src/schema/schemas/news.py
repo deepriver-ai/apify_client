@@ -66,12 +66,20 @@ NEWS_SCHEMA: Dict[str, Dict[str, Any]] = {
         "required": require_url  # Only required if type is not "impreso"
     },
     "media_urls": {"type": UrlList},
-    "comments": {"type": list},
+    "comments": {"type": "List[Comment]"},
     "location_ids": {"type": list},
 
     # Nested objects
     "source_extra": {"type": "SourceExtra"},
     "supplier": {"type": "Supplier"}
+}
+
+# Schema for a single Comment (nested list item on News)
+COMMENT_SCHEMA: Dict[str, Dict[str, Any]] = {
+    "comment_text":      {"type": str},
+    "comment_author":    {"type": str},
+    "comment_timestamp": {"type": datetime},
+    "comment_likes":     {"type": int},
 }
 
 # Schema for SourceExtra (nested object)
@@ -125,9 +133,10 @@ MESSAGE_WRAPPER_SCHEMA: Dict[str, Dict[str, Any]] = {
 }
 
 __all__ = [
-    "NEWS_SCHEMA", 
-    "SOURCE_EXTRA_SCHEMA", 
-    "SOURCE_EXTRA_STATS_SCHEMA", 
+    "NEWS_SCHEMA",
+    "COMMENT_SCHEMA",
+    "SOURCE_EXTRA_SCHEMA",
+    "SOURCE_EXTRA_STATS_SCHEMA",
     "SUPPLIER_SCHEMA",
     "MESSAGE_WRAPPER_SCHEMA",
     "default_timestamp_added",

@@ -15,7 +15,7 @@ def actor():
     with patch("src.actors.actor.ApifyActor._load_filter_cache", return_value={}):
         a = ApifyActor.__new__(ApifyActor)
     a.client = MagicMock()
-    a.search_params = ["totalenergies"]
+    a.search_params_keywords = ["totalenergies"]
     a._filter_cache = {}
     a._save_filter_cache = MagicMock()  # avoid writing to disk in tests
     return a
@@ -44,7 +44,7 @@ class TestBuildSnippet:
         assert snippet == doc.data["body"][:250]
 
     def test_no_search_params_uses_first_chars(self, actor):
-        actor.search_params = []
+        actor.search_params_keywords = []
         doc = Post()
         doc.data["body"] = "Some post text " + "x" * 300
         snippet = actor._build_snippet(doc)

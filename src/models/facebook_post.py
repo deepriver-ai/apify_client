@@ -15,9 +15,12 @@ class FacebookPost(Post):
         """Create a FacebookPost from a raw Facebook Posts Scraper result."""
         url = item.get("url", "")
 
-        # Extract page name from URL (e.g., "QroMunicipio" from facebook.com/QroMunicipio/...)
-        #page_name = _extract_facebook_page_name(url)
-        page_name = item.get('user', {}).get('name') or item.get("pageName")
+        # Prefer explicit user/page fields from the API; fall back to the page slug in the URL.
+        page_name = (
+            item.get('user', {}).get('name')
+            or item.get("pageName")
+            or _extract_facebook_page_name(url)
+        )
         profile_url = item.get('facebookUrl') or (f"https://www.facebook.com/{page_name}/" if page_name else None)
 
         media = item.get("media", [])
@@ -52,6 +55,97 @@ class FacebookPost(Post):
             "post_type": post_type,
         })
         return cls(data=data, raw=item)
+
+    @classmethod
+    def from_facebook_search(cls, item: Dict[str, Any]) -> FacebookPost:
+        """Create a FacebookPost from a raw scrapeforge/facebook-search-posts result."""
+        author = item.get("author") or {}
+        author_name = (
+            author.get("name")
+            or author.get("full_name")
+            or item.get("page_name")
+        )
+        profile_url = (
+            author.get("profile_url")
+            or author.get("url")
+            or (f"https://www.facebook.com/{author_name}/" if author_name else None)
+        )
+
+        url = (
+            item.get("post_url")
+            or item.get("url")
+            or item.get("permalink")
+        )
+
+        body = item.get("text") or item.get("content") or ""
+
+        timestamp = item.get("timestamp") or item.get("created_time") or item.get("posted_at")
+        if isinstance(timestamp, (int, float)):
+            try:
+                timestamp = datetime.fromtimestamp(int(timestamp), tz=timezone.utc).isoformat()
+            except (ValueError, OSError):
+                timestamp = None
+
+        post_type = _infer_facebook_search_post_type(item)
+        media_urls = _collect_facebook_search_media_urls(item)
+
+        reactions = item.get("reactions") or {}
+        likes = (
+            item.get("likes_count")
+            or item.get("reactions_count")
+            or reactions.get("like")
+            or reactions.get("total")
+        )
+
+        data = cls._empty_data()
+        data.update({
+            "timestamp": timestamp,
+            "source": author_name or "Facebook",
+            "body": body,
+            "title": (body[:80] or None) if body else None,
+            "url": url,
+            "media_urls": media_urls,
+            "type": "news",
+            "author": author_name,
+            "author_full_name": author_name,
+            "likes": likes,
+            "shares": item.get("shares_count") or item.get("shares"),
+            "n_comments": item.get("comments_count") or item.get("comments"),
+            "profile_url": profile_url,
+            "post_type": post_type,
+        })
+        return cls(data=data, raw=item)
+
+
+def _infer_facebook_search_post_type(item: Dict[str, Any]) -> str:
+    if item.get("video_url") or item.get("videos"):
+        return "Video"
+    if item.get("images") or item.get("image_url"):
+        return "Photo"
+    return "Status"
+
+
+def _collect_facebook_search_media_urls(item: Dict[str, Any]) -> List[str]:
+    urls: List[str] = []
+    for key in ("image_url", "video_url", "thumbnail"):
+        u = item.get(key)
+        if u:
+            urls.append(u)
+    for img in item.get("images", []) or []:
+        if isinstance(img, str):
+            urls.append(img)
+        elif isinstance(img, dict):
+            u = img.get("url") or img.get("src")
+            if u:
+                urls.append(u)
+    for vid in item.get("videos", []) or []:
+        if isinstance(vid, str):
+            urls.append(vid)
+        elif isinstance(vid, dict):
+            u = vid.get("url") or vid.get("hd") or vid.get("sd")
+            if u:
+                urls.append(u)
+    return urls
 
 
 def _extract_facebook_page_name(url: str) -> str | None:

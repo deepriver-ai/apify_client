@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from src.schema import normalize_record
 
 
@@ -29,7 +31,38 @@ class TestNewsSchemaComments:
             }
         ]
         result = normalize_record(_base_record(comments=comments), "MessageWrapper")
-        assert result["message"]["comments"] == comments
+        parsed = result["message"]["comments"]
+        assert len(parsed) == 1
+        assert parsed[0]["comment_text"] == "Great article!"
+        assert parsed[0]["comment_author"] == "user1"
+        assert isinstance(parsed[0]["comment_timestamp"], datetime)
+        assert parsed[0]["comment_likes"] == 5
+
+    def test_coerces_facebook_shape(self):
+        # Real shape from scrapeforge/facebook-search-posts: likes as a string.
+        comments = [
+            {
+                "comment_text": "Por cuál de las dos puertas será el acceso?",
+                "comment_author": "Mia G Aguillon",
+                "comment_timestamp": "2026-04-08T01:13:11.000Z",
+                "comment_likes": "1",
+            }
+        ]
+        result = normalize_record(_base_record(comments=comments), "MessageWrapper")
+        item = result["message"]["comments"][0]
+        assert isinstance(item["comment_timestamp"], datetime)
+        assert item["comment_likes"] == 1
+
+    def test_comments_missing_fields_filled(self):
+        result = normalize_record(
+            _base_record(comments=[{"comment_text": "x"}]),
+            "MessageWrapper",
+        )
+        item = result["message"]["comments"][0]
+        assert item["comment_text"] == "x"
+        assert item["comment_author"] is None
+        assert item["comment_timestamp"] is None
+        assert item["comment_likes"] is None
 
     def test_accepts_empty_list(self):
         result = normalize_record(_base_record(comments=[]), "MessageWrapper")
@@ -37,8 +70,7 @@ class TestNewsSchemaComments:
 
     def test_none_normalized(self):
         result = normalize_record(_base_record(comments=None), "MessageWrapper")
-        # ListParser should handle None gracefully
-        assert result["message"]["comments"] is None or result["message"]["comments"] == []
+        assert result["message"]["comments"] == []
 
     def test_all_expected_fields_in_message(self):
         result = normalize_record(_base_record(), "MessageWrapper")
