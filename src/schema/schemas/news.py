@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, Optional
 import re
 from datetime import datetime
@@ -8,27 +9,42 @@ from tldextract import TLDExtract
 from src.schema.types import EnumStr, Url, UrlList
 from src.helpers.str_fn import _is_valid_url
 
-news_types = ["news", "X", "Facebook", "impreso", "Instagram", "Radio", "TV"]
+news_types = ["news", "x", "facebook", "impreso", "instagram", "linkedin", "radio", "tv"]
 
 
 def date_now(*args, **kwargs) -> datetime:
     return datetime.now(tz=ZoneInfo("America/Mexico_City"))
 
 
-def default_timestamp_added(obj: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> str:
+def default_timestamp_added(obj: Dict[str, Any], context: Optional[Dict[str, Any]] = None, record: Optional[Dict[str, Any]] = None) -> str:
     """Default timestamp_added to current execution time"""
     return datetime.now(tz=ZoneInfo("America/Mexico_City")).isoformat()
 
 
 
-def default_source_extra_found_source(obj: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> bool:
+def default_comment_id(obj: Dict[str, Any], context: Optional[Dict[str, Any]] = None, record: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Auto-generate comment_id as <post_url>-hash(comment_author)-timestamp.
+
+    Uses the post URL from the parent message, hashes the comment author
+    (first 8 hex chars of MD5), and formats the timestamp as %Y%m%d%H%M.
+    """
+    record = record or {}
+    post_url = ((obj or {}).get("message") or {}).get("url") or ""
+    author = record.get("comment_author") or ""
+    author_hash = hashlib.md5(author.encode()).hexdigest()[:8]
+    ts = record.get("comment_timestamp")
+    ts_str = ts.strftime("%Y%m%d%H%M") if isinstance(ts, datetime) else ""
+    return f"{post_url}-{author_hash}-{ts_str}"
+
+
+def default_source_extra_found_source(obj: Dict[str, Any], context: Optional[Dict[str, Any]] = None, record: Optional[Dict[str, Any]] = None) -> bool:
     """Default __FOUND_SOURCE__ flag"""
     return obj.get("__FOUND_SOURCE__") is not None
 
 
 def require_url(obj: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> bool:
-    if obj['message'].get("type", "").lower() != "impreso":
-        return _is_valid_url(obj['message'].get("url"))
+    if obj.get("type", "").lower() != "impreso":
+        return _is_valid_url(obj.get("url"))
     return True
 
 
@@ -80,6 +96,7 @@ COMMENT_SCHEMA: Dict[str, Dict[str, Any]] = {
     "comment_author":    {"type": str},
     "comment_timestamp": {"type": datetime},
     "comment_likes":     {"type": int},
+    "comment_id":        {"type": str, "default": default_comment_id},
 }
 
 # Schema for SourceExtra (nested object)
@@ -126,19 +143,12 @@ SUPPLIER_SCHEMA: Dict[str, Dict[str, Any]] = {
     "opinion": {"type": str}
 }
 
-# Schema for the final message wrapper
-MESSAGE_WRAPPER_SCHEMA: Dict[str, Dict[str, Any]] = {
-    "type": {"type": str, "default": "news"},
-    "message": {"type": "News"}
-}
-
 __all__ = [
     "NEWS_SCHEMA",
     "COMMENT_SCHEMA",
     "SOURCE_EXTRA_SCHEMA",
     "SOURCE_EXTRA_STATS_SCHEMA",
     "SUPPLIER_SCHEMA",
-    "MESSAGE_WRAPPER_SCHEMA",
     "default_timestamp_added",
     "default_source_extra_found_source",
 ]

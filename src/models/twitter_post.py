@@ -47,7 +47,7 @@ class TwitterPost(Post):
             "title": (body[:80] or None) if body else None,
             "url": url,
             "media_urls": _collect_tweet_media_urls(item),
-            "type": "news",
+            "type": "x",
             "author": author_name,
             "author_full_name": user.get("name"),
             "author_profile_bio": user.get("description"),

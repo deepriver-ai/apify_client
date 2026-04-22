@@ -22,7 +22,7 @@ class InstagramPost(Post):
             "title": item.get("caption", item.get("ownerFullName"))[:80],
             "url": item.get("url"),
             "media_urls": _collect_media_urls(item),
-            "type": "news",  # Has to be news as -for now- it is saved as a news object in Elasticsearch
+            "type": "instagram",
             "author": item.get("ownerFullName") or username,
             "likes": item.get("likesCount"),
             "shares": item.get("reshareCount"),

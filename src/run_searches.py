@@ -15,18 +15,21 @@ from src.models.crawl_task import CrawlTask, load_tasks
 logger = logging.getLogger(__name__)
 
 DEFAULT_TASKS_CSV = "tasks.xlsx"
+CURRENT_THEME = "orizaba"
 
 
 
 if __name__ == "__main__":
     xlsx_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_TASKS_CSV
-    
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     tasks = load_tasks(xlsx_path)
     logger.info("Loaded %d enabled tasks from %s", len(tasks), xlsx_path)
 
-    tasks = tasks[5:]  # ORIZABA
+    if CURRENT_THEME:
+        tasks = [t for t in tasks if t.theme == CURRENT_THEME]
+        logger.info("Filtered to %d tasks with theme=%s", len(tasks), CURRENT_THEME)
     for task in tasks:
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:

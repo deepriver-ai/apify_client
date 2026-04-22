@@ -7,7 +7,6 @@ from src.models.document import Document
 from src.models.news_parser.load_url import fetch_html
 from src.models.news_parser.parser import extract_article
 from src.models.sources_management import SourcesManagement
-from src.schema import normalize_record
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +111,3 @@ class News(Document):
         for key, value in location.items():
             self.data[key] = value
         self.sources_manager.check_source(url, self.data.get("source"))
-
-    def to_final_schema(self) -> Dict[str, Any]:
-        """Normalize to the MessageWrapper schema."""
-        return normalize_record(self.data, "MessageWrapper")

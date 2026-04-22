@@ -6,7 +6,7 @@ from src.schema import normalize_record
 
 
 def _base_record(**overrides):
-    """Minimal valid record for MessageWrapper normalization."""
+    """Minimal valid record for News normalization."""
     record = {
         "body": "Test body content that is long enough",
         "title": "Test title",
@@ -30,8 +30,8 @@ class TestNewsSchemaComments:
                 "comment_likes": 5,
             }
         ]
-        result = normalize_record(_base_record(comments=comments), "MessageWrapper")
-        parsed = result["message"]["comments"]
+        result = normalize_record(_base_record(comments=comments), "News")
+        parsed = result["comments"]
         assert len(parsed) == 1
         assert parsed[0]["comment_text"] == "Great article!"
         assert parsed[0]["comment_author"] == "user1"
@@ -48,37 +48,36 @@ class TestNewsSchemaComments:
                 "comment_likes": "1",
             }
         ]
-        result = normalize_record(_base_record(comments=comments), "MessageWrapper")
-        item = result["message"]["comments"][0]
+        result = normalize_record(_base_record(comments=comments), "News")
+        item = result["comments"][0]
         assert isinstance(item["comment_timestamp"], datetime)
         assert item["comment_likes"] == 1
 
     def test_comments_missing_fields_filled(self):
         result = normalize_record(
             _base_record(comments=[{"comment_text": "x"}]),
-            "MessageWrapper",
+            "News",
         )
-        item = result["message"]["comments"][0]
+        item = result["comments"][0]
         assert item["comment_text"] == "x"
         assert item["comment_author"] is None
         assert item["comment_timestamp"] is None
         assert item["comment_likes"] is None
 
     def test_accepts_empty_list(self):
-        result = normalize_record(_base_record(comments=[]), "MessageWrapper")
-        assert result["message"]["comments"] == []
+        result = normalize_record(_base_record(comments=[]), "News")
+        assert result["comments"] == []
 
     def test_none_normalized(self):
-        result = normalize_record(_base_record(comments=None), "MessageWrapper")
-        assert result["message"]["comments"] == []
+        result = normalize_record(_base_record(comments=None), "News")
+        assert result["comments"] == []
 
     def test_all_expected_fields_in_message(self):
-        result = normalize_record(_base_record(), "MessageWrapper")
-        msg = result["message"]
-        assert "body" in msg
-        assert "title" in msg
-        assert "timestamp" in msg
-        assert "source" in msg
-        assert "comments" in msg
-        assert "url" in msg
-        assert "media_urls" in msg
+        result = normalize_record(_base_record(), "News")
+        assert "body" in result
+        assert "title" in result
+        assert "timestamp" in result
+        assert "source" in result
+        assert "comments" in result
+        assert "url" in result
+        assert "media_urls" in result

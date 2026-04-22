@@ -155,15 +155,11 @@ class TypeParser:
         if spec:
             required = spec.get("required")
 
-            is_required = bool(required)
-
-            # Support callable required (like default values)
+            # Callable required owns the decision entirely: True = OK, False = missing.
             if callable(required):
-
                 if not required(full_object or {}, context or {}):
                     raise ValueError(f"Missing required field: {field_name or 'field'} by function {spec.get('required')}")
-            
-            if is_required and _is_null(value):
+            elif bool(required) and _is_null(value):
                 raise ValueError(f"Missing required field: {field_name or 'field'}")
 
 

@@ -8,4 +8,4 @@ cache
 *.pyo
 
 __pycache__/
-
+~$tasks.xlsx

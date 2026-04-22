@@ -19,7 +19,7 @@ class TestFromFacebook:
         item = sample_facebook_posts_results[0]  # Photo post
         post = FacebookPost.from_facebook(item)
 
-        assert post.data["type"] == "news"
+        assert post.data["type"] == "facebook"
         assert post.data["source"] == "QroMunicipio"
         assert post.data["author"] == "QroMunicipio"
         assert post.data["post_type"] == "Photo"
@@ -33,7 +33,7 @@ class TestFromFacebook:
         item = sample_facebook_posts_results[1]  # Video/Reel post
         post = FacebookPost.from_facebook(item)
 
-        assert post.data["type"] == "news"
+        assert post.data["type"] == "facebook"
         assert post.data["post_type"] in ("Video", "Reel")
         # Video posts have publish_time as timestamp
         assert post.data["timestamp"] is not None
@@ -176,9 +176,10 @@ class TestFinalSchema:
         post = FacebookPost.from_facebook(sample_facebook_posts_results[0])
         post.data["timestamp"] = "2026-03-28T12:00:00"
         final = post.to_final_schema()
+        assert final["type"] == "news"  # envelope is always "news"
         msg = final["message"]
         assert msg["source"] == "QroMunicipio"
-        assert msg["type"] == "news"
+        assert msg["type"] == "facebook"
         assert "body" in msg
         assert "title" in msg
         assert "comments" in msg

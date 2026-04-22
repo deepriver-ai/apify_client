@@ -18,7 +18,7 @@ Base class for all media types (`src/models/document.py`).
 - `Document.matches_min_date(dt)` — checks if document's timestamp is >= the given datetime
 - `Document.matches_location(country_id)` — checks `location_ids` first: if non-empty, any geoid prefix match keeps the doc. Falls back to `author_location_id` when `location_ids` is empty. Non-geoid IDs (e.g. Instagram numeric) pass through. Documents with no location data are kept
 - `Document.enrich_location(**kwargs)` — abstract method; subclasses implement platform-specific location enrichment (geocoding for posts, SourcesManagement lookup for news)
-- `Document.to_final_schema()` — abstract method; subclasses normalize `self.data` to the final output schema
+- `Document.to_final_schema()` — parses `self.data` against `NEWS_SCHEMA` and returns `{"type": "news", "message": parsed}`. The envelope `type` is always `"news"`; the inner `message.type` carries the actual platform (one of `news`, `x`, `facebook`, `instagram`, `linkedin`, `impreso`, `radio`, `tv`). Subclasses can override to add preprocessing, then call `super().to_final_schema()`
 
 ## News
 
@@ -28,13 +28,13 @@ News article model (`src/models/news.py`). Inherits from `Document`.
 - `News.from_google_news(item)` — class method that creates a `News` from a raw Google News Apify result, mapping `link`/`url`, `title`, `description`, `image`, `publishedAt`, and `source` into the intermediate schema. Pure data mapping — no enrichment or source lookups
 - `News.fetch_and_parse()` — downloads the article HTML via `fetch_html(url)`, unpacking the `(html, final_url)` tuple. Updates `self.data["url"]` to the final URL when it differs from the original (handling shortened/redirected URLs). Passes the final URL to `extract_article(html, final_url)`. Updates `title`, `body`, `author`, and `media_urls` in `self.data`. Returns `True` on success, `False` on failure
 - `News.enrich_location(sources)` — sets all author location fields (`author_location_text`, `author_location_id`, `location_author_formatted_name`, `location_author_geoid`, `location_author_coords`, `location_author_precision_level`, `location_author_level_1`/`level_2`/`level_3` and their IDs) from `SourcesManagement` domain lookup. Also calls `check_source()` to track unknown domains
-- `News.to_final_schema()` — normalizes `self.data` via `normalize_record(data, "MessageWrapper")`
+- `News` uses the inherited `Document.to_final_schema()` — `data["type"]` is `"news"`, so the envelope wraps as `{"type": "news", "message": parsed_news}`
 
 ## Post
 
-Base social media post model (`src/models/post.py`). Inherits from `Document`. Platform-specific subclasses handle data mapping.
+Base social media post model (`src/models/post.py`). Inherits from `Document`. Platform-specific subclasses handle data mapping and set `data["type"]` to the real platform (`instagram`, `facebook`, `x`, `linkedin`).
 
-Posts share the same `MessageWrapper` final schema (defined in `src/schema/schemas/news.py`).
+Posts share the same final envelope as News: `{"type": "news", "message": parsed}` where `parsed` is validated against `NEWS_SCHEMA`.
 
 - `Post.attached_news` — `News | None` attribute (initialized to `None`). Stores the `News` object created when a linked article is successfully fetched via `fetch_attached_url()`
 - `Post.fetch_attached_url(sources_manager)` — extracts the first external URL from the post body, fetches and parses it via `News.from_url()`, appends article text as `\n\n attached_url_text: <text>`, optionally copies the source location to the post, and stores the resulting `News` object on `self.attached_news`
@@ -42,7 +42,7 @@ Posts share the same `MessageWrapper` final schema (defined in `src/schema/schem
 - `Post.enrich_location(**kwargs)` — geocodes body text to populate `location_ids` and `location_author_*` fields. If a `users_manager` is provided in kwargs and already has cached location data for the user (by `profile_url`), applies cached data and skips geocoding. When geocoding finds a city-level location, saves it to `UsersManagement` for future reuse
 - `Post.apply_cached_user_author()` — applies cached `website_visits`, `author_full_name`, `author_profile_bio`, and `author_location_text` from `UsersManagement` to the post's intermediate schema
 - `Post.save_user_author_stats(stats)` — writes profile stats (follower count, full name, bio, and `author_location_text` when present) to the intermediate schema and persists to `UsersManagement`
-- `Post.to_final_schema()` — normalizes `self.data` via `normalize_record(data, "MessageWrapper")`
+- `Post.to_final_schema()` — fills fallback `body`, `title`, and `fb_likes`, then delegates to `Document.to_final_schema()` for schema parsing and envelope wrapping. Returns `None` on validation error (logged)
 
 ### InstagramPost
 
@@ -142,11 +142,12 @@ All data fetched from Apify is first translated into this common intermediate sc
 | `comments` | List of comment dicts, each with `comment_text`, `comment_author`, `comment_timestamp`, `comment_likes`. Empty list if comments not scraped |
 | `video_filename` | Local path to downloaded video file (set by `InstagramProfilePostsActor._download_video()`). Default directory: `cache/media/instagram` |
 
-Final normalization uses the schema engine in `src/schema/` (see `src/schema/readme_schema.md`):
+Final normalization uses the schema engine in `src/schema/` (see `src/schema/readme_schema.md`). `Document.to_final_schema()` parses against `NEWS_SCHEMA` and wraps the result:
 
 ```python
 from src.schema import normalize_record
-normalized = normalize_record(raw_record, "MessageWrapper")
+parsed = normalize_record(raw_record, "News")
+envelope = {"type": "news", "message": parsed}
 ```
 
 
@@ -177,6 +178,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 | `not_keywords` | `List[str]` | `[]` | Keywords to exclude — documents containing any are filtered out. Pipe-separated in CSV |
 | `llm_filter_condition` | `str \| None` | `None` | Spanish-language LLM filtering condition. If set, documents are filtered via batched LLM calls |
 | `override_filters` | `bool` | `False` | If true, ignores the filter cache and re-runs all filters from scratch. Useful for reprocessing after changing filter conditions |
+| `theme` | `str \| None` | `None` | Theme tag grouping tasks (e.g. `orizaba`). `run_searches.py` filters tasks to a single `CURRENT_THEME` constant at runtime |
 | `actor_params` | `Dict[str, Any]` | `{}` | Actor-specific overrides (parsed from JSON in CSV) |
 
 **Key methods:**
@@ -206,6 +208,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 | `not_keywords` | str | no | Pipe-separated keywords to exclude (e.g. `spam\|ads`). Documents containing any keyword (case-insensitive, substring match on body+title) are filtered out as the first pipeline step |
 | `llm_filter_condition` | str | no | Spanish-language filtering condition for LLM-based filtering. The LLM receives text snippets and applies this condition to decide which to keep. Example: `"elimina publicaciones que no estén relacionadas con lubricantes"` |
 | `override_filters` | bool | no | Default false. If true, ignores filter cache and re-runs all filters from scratch |
+| `theme` | str | no | Theme tag (e.g. `orizaba`). Only tasks matching `CURRENT_THEME` in `src/run_searches.py` are executed |
 | `actor_params` | JSON str | no | Actor-specific overrides as JSON |
 
 

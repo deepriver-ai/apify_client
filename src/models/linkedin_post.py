@@ -45,7 +45,7 @@ class LinkedInPost(Post):
             "title": (body[:80] or None) if body else None,
             "url": item.get("url") or item.get("postUrl") or item.get("linkedinUrl"),
             "media_urls": _collect_linkedin_media_urls(item),
-            "type": "news",
+            "type": "linkedin",
             "author": author_name,
             "author_full_name": author_name,
             "author_profile_bio": bio,

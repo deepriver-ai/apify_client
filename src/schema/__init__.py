@@ -9,7 +9,6 @@ from .schemas.news import (
     SOURCE_EXTRA_SCHEMA,
     SOURCE_EXTRA_STATS_SCHEMA,
     SUPPLIER_SCHEMA,
-    MESSAGE_WRAPPER_SCHEMA
 )
 from .parse_object import Parser
 from .types import (
@@ -35,7 +34,6 @@ SCHEMA = {
     "SourceExtra": SOURCE_EXTRA_SCHEMA,
     "SourceExtraStats": SOURCE_EXTRA_STATS_SCHEMA,
     "Supplier": SUPPLIER_SCHEMA,
-    "MessageWrapper": MESSAGE_WRAPPER_SCHEMA
 }
 
 # Convenience function for normalizing records
@@ -64,7 +62,6 @@ __all__ = [
     "SOURCE_EXTRA_SCHEMA",
     "SOURCE_EXTRA_STATS_SCHEMA",
     "SUPPLIER_SCHEMA",
-    "MESSAGE_WRAPPER_SCHEMA",
     "Parser",
     "normalize_record"
 ]

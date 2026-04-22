@@ -46,7 +46,7 @@ class FacebookPost(Post):
             "title": (item.get("text") or "")[:80] or None,
             "url": url,
             "media_urls": media_urls,
-            "type": "news",  # Has to be news as -for now- it is saved as a news object in Elasticsearch
+            "type": "facebook",
             "author": page_name,
             "likes": item.get("likes"),
             "shares": item.get("shares"),
@@ -105,7 +105,7 @@ class FacebookPost(Post):
             "title": (body[:80] or None) if body else None,
             "url": url,
             "media_urls": media_urls,
-            "type": "news",
+            "type": "facebook",
             "author": author_name,
             "author_full_name": author_name,
             "likes": likes,

@@ -7,6 +7,7 @@ from dateutil import parser as dateutil_parser
 from langdetect import LangDetectException, detect
 
 from src.helpers.language import normalize_language
+from src.schema import normalize_record
 
 
 class Document:
@@ -142,8 +143,15 @@ class Document:
         return loc_str.startswith(country_id)
 
     def to_final_schema(self) -> Dict[str, Any]:
-        """Normalize data to the final schema. Subclasses must implement."""
-        raise NotImplementedError
+        """Normalize data to the final schema.
+
+        Parses ``self.data`` against NEWS_SCHEMA and wraps the result in the
+        message envelope expected by downstream consumers. The envelope
+        ``type`` is always ``"news"``; the inner ``message.type`` carries the
+        actual platform (news, x, facebook, instagram, linkedin, ...).
+        """
+        parsed = normalize_record(self.data, "News")
+        return {"type": "news", "message": parsed}
 
     def enrich_location(self, **kwargs) -> None:
         """Enrich document with location data. Subclasses must implement."""

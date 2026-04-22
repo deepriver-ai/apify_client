@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
+
 from src.models.document import Document
 
 
@@ -85,3 +87,51 @@ class TestMatchesLocation:
     def test_fallback_non_geoid_author_location_id(self):
         doc = Document({"location_ids": [], "author_location_id": "12345"})
         assert doc.matches_location("_484") is True
+
+
+def _valid_data(**overrides):
+    """Intermediate-schema data that passes NEWS_SCHEMA validation."""
+    data = Document._empty_data()
+    data.update({
+        "body": "Body content long enough for parsing",
+        "title": "Title",
+        "timestamp": "2026-01-01T00:00:00",
+        "source": "TestSource",
+        "type": "news",
+        "url": "https://example.com/article",
+    })
+    data.update(overrides)
+    return data
+
+
+class TestToFinalSchema:
+    def test_envelope_is_news_and_inner_type_preserved(self):
+        doc = Document(_valid_data(type="instagram"))
+        result = doc.to_final_schema()
+        assert result["type"] == "news"
+        assert result["message"]["type"] == "instagram"
+
+    def test_news_type_passes_through(self):
+        doc = Document(_valid_data(type="news"))
+        result = doc.to_final_schema()
+        assert result["message"]["type"] == "news"
+
+    def test_all_platform_types_accepted(self):
+        for platform in ("news", "x", "facebook", "instagram", "linkedin", "radio", "tv"):
+            doc = Document(_valid_data(type=platform))
+            result = doc.to_final_schema()
+            assert result["message"]["type"] == platform
+
+    def test_impreso_allows_missing_url(self):
+        data = _valid_data(type="impreso")
+        data["url"] = None
+        doc = Document(data)
+        result = doc.to_final_schema()
+        assert result["message"]["type"] == "impreso"
+
+    def test_non_impreso_requires_url(self):
+        data = _valid_data(type="news")
+        data["url"] = None
+        doc = Document(data)
+        with pytest.raises(ValueError, match="url"):
+            doc.to_final_schema()

@@ -34,6 +34,7 @@ class CrawlTask:
     override_filters: bool = False
     enrich_followers: bool = False
     fetch_attached_url: bool = False
+    theme: str | None = None
     actor_params: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -99,6 +100,7 @@ class CrawlTask:
             override_filters=parse_bool(row.get("override_filters", ""), default=False),
             enrich_followers=parse_bool(row.get("enrich_followers", ""), default=False),
             fetch_attached_url=parse_bool(row.get("fetch_attached_url", ""), default=False),
+            theme=row.get("theme", "").strip().lower() or None,
             actor_params=actor_params,
         )
 

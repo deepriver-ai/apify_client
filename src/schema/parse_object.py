@@ -110,7 +110,7 @@ class Parser:
             if out.get(field_name) is None and "default" in spec:
                 default_value = spec["default"]
                 try:
-                    out[field_name] = default_value(full_object, context) if callable(default_value) else default_value
+                    out[field_name] = default_value(full_object, context, out) if callable(default_value) else default_value
                 except Exception:
                     raise
 

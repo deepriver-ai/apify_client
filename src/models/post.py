@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from src.helpers.geocode import geocode
 from src.models.document import Document
 from src.models.users_management import UsersManagement
-from src.schema import normalize_record
 
 if TYPE_CHECKING:
     from src.models.news import News
@@ -196,16 +195,13 @@ class Post(Document):
             self.data["author_location_text"] = stats.get("author_location_text")
 
     def to_final_schema(self) -> Dict[str, Any]:
-        """Normalize to the MessageWrapper schema."""
-        
-        # Fallback fields generation
+        """Fill post-specific fallback fields, then delegate to Document."""
 
         if not self.data.get("body"):
             self.data["body"] = f"{self.data.get('author')} - {self.data.get('url')}"
-        
+
         self.data["fb_likes"] = self.data.get("likes")
-        
-        # Fallback title generation if not present
+
         if not self.data.get("title"):
             body = self.data.get("body") or ""
             if body:
@@ -215,7 +211,7 @@ class Post(Document):
                 url = self.data.get("url") or ""
                 self.data["title"] = f"{author} - {url}" if url else author
         try:
-            return normalize_record(self.data, "MessageWrapper")
+            return super().to_final_schema()
         except Exception as e:
             logger.error("Error normalizing post %s: %s", self.data.get("url"), e)
             return None
