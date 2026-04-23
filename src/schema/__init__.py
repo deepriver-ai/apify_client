@@ -8,6 +8,7 @@ from .schemas.news import (
     COMMENT_SCHEMA,
     SOURCE_EXTRA_SCHEMA,
     SOURCE_EXTRA_STATS_SCHEMA,
+    LOCATION_AUTHOR_SCHEMA,
     SUPPLIER_SCHEMA,
 )
 from .parse_object import Parser
@@ -33,6 +34,7 @@ SCHEMA = {
     "Comment": COMMENT_SCHEMA,
     "SourceExtra": SOURCE_EXTRA_SCHEMA,
     "SourceExtraStats": SOURCE_EXTRA_STATS_SCHEMA,
+    "LocationAuthor": LOCATION_AUTHOR_SCHEMA,
     "Supplier": SUPPLIER_SCHEMA,
 }
 
@@ -61,6 +63,7 @@ __all__ = [
     "COMMENT_SCHEMA",
     "SOURCE_EXTRA_SCHEMA",
     "SOURCE_EXTRA_STATS_SCHEMA",
+    "LOCATION_AUTHOR_SCHEMA",
     "SUPPLIER_SCHEMA",
     "Parser",
     "normalize_record"

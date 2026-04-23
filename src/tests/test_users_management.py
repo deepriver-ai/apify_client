@@ -92,8 +92,8 @@ class TestNeedsStatsUpdate:
     def test_stale_stats_need_update(self, users_mgr):
         url = "https://instagram.com/user1/"
         users_mgr.save_stats(url, {"website_visits": 500})
-        # Manually backdate
-        users_mgr._users[url]["date_stats_updated"] = (
+        # Manually backdate (profile URLs are normalized: trailing slash stripped)
+        users_mgr._users[url.rstrip("/")]["date_stats_updated"] = (
             datetime.now() - timedelta(days=100)
         ).isoformat()
         assert users_mgr.needs_stats_update(url, max_age_days=90)
@@ -101,7 +101,7 @@ class TestNeedsStatsUpdate:
     def test_custom_max_age(self, users_mgr):
         url = "https://instagram.com/user1/"
         users_mgr.save_stats(url, {"website_visits": 500})
-        users_mgr._users[url]["date_stats_updated"] = (
+        users_mgr._users[url.rstrip("/")]["date_stats_updated"] = (
             datetime.now() - timedelta(days=10)
         ).isoformat()
         assert not users_mgr.needs_stats_update(url, max_age_days=30)
@@ -120,3 +120,31 @@ class TestPersistence:
         user = mgr2.get_user("https://instagram.com/u/")
         assert user is not None
         assert user["website_visits"] == 42
+
+
+class TestTrailingSlashNormalization:
+
+    def test_lookup_slash_tolerant(self, users_mgr):
+        users_mgr.save_stats("https://instagram.com/u", {"website_visits": 10})
+        assert users_mgr.is_known("https://instagram.com/u")
+        assert users_mgr.is_known("https://instagram.com/u/")
+        assert users_mgr.get_stats("https://instagram.com/u/")["website_visits"] == 10
+
+    def test_write_slash_tolerant(self, users_mgr):
+        users_mgr.save_stats("https://instagram.com/u/", {"website_visits": 10})
+        users_mgr.save_stats("https://instagram.com/u", {"website_visits": 20})
+        assert users_mgr.get_stats("https://instagram.com/u")["website_visits"] == 20
+
+    def test_legacy_keys_normalized_on_load(self, tmp_path):
+        cache_file = str(tmp_path / "users.json")
+        with open(cache_file, "w") as f:
+            json.dump({
+                "https://instagram.com/legacy/": {
+                    "profile_url": "https://instagram.com/legacy/",
+                    "website_visits": 5,
+                }
+            }, f)
+        mgr = UsersManagement(cache_path=cache_file)
+        assert mgr.is_known("https://instagram.com/legacy")
+        assert mgr.is_known("https://instagram.com/legacy/")
+        assert mgr.get_user("https://instagram.com/legacy")["profile_url"] == "https://instagram.com/legacy"

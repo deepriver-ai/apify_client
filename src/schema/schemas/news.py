@@ -87,6 +87,7 @@ NEWS_SCHEMA: Dict[str, Dict[str, Any]] = {
     "location_ids": {"type": list},
 
     # Nested objects
+    "location_author": {"type": "LocationAuthor"},
     "source_extra": {"type": "SourceExtra"},
     "supplier": {"type": "Supplier"}
 }
@@ -117,19 +118,23 @@ SOURCE_EXTRA_STATS_SCHEMA: Dict[str, Dict[str, Any]] = {
     "n_comments": {"type": int},
     "profile_url": {"type": str},
     "post_type": {"type": str},
-    "location_author_formatted_name":   {"type": str},
-    "location_author_geoid":            {"type": str},
-    "location_author_coords":           {"type": "LocationCoords"},
-    "location_author_precision_level":  {"type": int},
-    "location_author_level_1":          {"type": str},
-    "location_author_level_1_id":       {"type": str},
-    "location_author_level_2":          {"type": str},
-    "location_author_level_2_id":       {"type": str},
-    "location_author_level_3":          {"type": str},
-    "location_author_level_3_id":       {"type": str},
     "author_full_name":                 {"type": str},
     "author_profile_bio":               {"type": str},
     "video_filename":                   {"type": str}
+}
+
+# Schema for LocationAuthor (nested object on News)
+LOCATION_AUTHOR_SCHEMA: Dict[str, Dict[str, Any]] = {
+    "formatted_name":   {"type": str},
+    "geoid":            {"type": str},
+    "coords":           {"type": "LocationCoords"},
+    "precision_level":  {"type": int},
+    "level_1":          {"type": str},
+    "level_1_id":       {"type": str},
+    "level_2":          {"type": str},
+    "level_2_id":       {"type": str},
+    "level_3":          {"type": str},
+    "level_3_id":       {"type": str},
 }
 
 # Schema for LocationCoords (nested object)
@@ -150,6 +155,7 @@ __all__ = [
     "COMMENT_SCHEMA",
     "SOURCE_EXTRA_SCHEMA",
     "SOURCE_EXTRA_STATS_SCHEMA",
+    "LOCATION_AUTHOR_SCHEMA",
     "SUPPLIER_SCHEMA",
     "default_timestamp_added",
     "default_source_extra_found_source",

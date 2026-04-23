@@ -230,10 +230,22 @@ class TestEnrichUserAuthor:
     """Test FacebookPagePostsActor._enrich_user_author()."""
 
     @pytest.fixture(autouse=True)
-    def _reset_users_cache(self):
-        """Reset shared UsersManagement cache between tests."""
+    def _reset_users_cache(self, tmp_path):
+        """Reset shared UsersManagement cache and redirect writes to a tmp file.
+
+        Post.users_manager is a module-level singleton pointed at the real
+        cache/users.json by default. save_stats() calls save() which would
+        clobber real user data, so redirect cache_path for the duration of
+        each test and restore it after.
+        """
         from src.models.post import Post
+        original_path = Post.users_manager.cache_path
+        original_users = Post.users_manager._users
+        Post.users_manager.cache_path = str(tmp_path / "users.json")
         Post.users_manager._users = {}
+        yield
+        Post.users_manager.cache_path = original_path
+        Post.users_manager._users = original_users
 
     @pytest.fixture
     def actor(self):

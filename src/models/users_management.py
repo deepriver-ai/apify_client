@@ -47,14 +47,29 @@ class UsersManagement:
         self.cache_path = cache_path
         self._users: Dict[str, Dict[str, Any]] = self._load()
 
+    @staticmethod
+    def _normalize(profile_url: str) -> str:
+        """Canonicalize a profile URL (strip trailing slash)."""
+        if not profile_url:
+            return profile_url
+        return profile_url.rstrip("/")
+
     def _load(self) -> Dict[str, Dict[str, Any]]:
-        """Load user cache from disk."""
+        """Load user cache from disk, normalizing any trailing-slash keys."""
         if os.path.exists(self.cache_path):
             try:
                 with open(self.cache_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    raw = json.load(f)
             except (OSError, json.JSONDecodeError):
                 logger.warning("Could not load users cache from %s, starting fresh", self.cache_path)
+                return {}
+            merged: Dict[str, Dict[str, Any]] = {}
+            for key, value in raw.items():
+                norm = self._normalize(key)
+                if isinstance(value, dict):
+                    value = {**value, "profile_url": norm}
+                merged[norm] = value
+            return merged
         return {}
 
     def save(self) -> None:
@@ -68,22 +83,22 @@ class UsersManagement:
 
     def get_user(self, profile_url: str) -> Optional[Dict[str, Any]]:
         """Return cached user data or None."""
-        return self._users.get(profile_url)
+        return self._users.get(self._normalize(profile_url))
 
     def is_known(self, profile_url: str) -> bool:
         """Return True if we have any data for this user."""
-        return profile_url in self._users
+        return self._normalize(profile_url) in self._users
 
     def has_location(self, profile_url: str) -> bool:
         """Return True if we have geocoded location data for this user."""
-        user = self._users.get(profile_url)
+        user = self._users.get(self._normalize(profile_url))
         if not user:
             return False
         return user.get("location_author_geoid") is not None
 
     def needs_stats_update(self, profile_url: str, max_age_days: int = 90) -> bool:
         """Return True if user stats are missing or older than max_age_days."""
-        user = self._users.get(profile_url)
+        user = self._users.get(self._normalize(profile_url))
         if not user:
             return True
         date_str = user.get("date_stats_updated")
@@ -102,10 +117,11 @@ class UsersManagement:
             profile_url: User identifier (profile URL).
             stats: Dict with keys like ``website_visits``, ``author``, etc.
         """
-        if profile_url not in self._users:
-            self._users[profile_url] = {"profile_url": profile_url}
-        self._users[profile_url].update(stats)
-        self._users[profile_url]["date_stats_updated"] = datetime.now().isoformat()
+        key = self._normalize(profile_url)
+        if key not in self._users:
+            self._users[key] = {"profile_url": key}
+        self._users[key].update(stats)
+        self._users[key]["date_stats_updated"] = datetime.now().isoformat()
         self.save()
 
     def save_location(self, profile_url: str, location: Dict[str, Any]) -> None:
@@ -115,23 +131,24 @@ class UsersManagement:
             profile_url: User identifier (profile URL).
             location: Dict with location_author_* fields.
         """
-        if profile_url not in self._users:
-            self._users[profile_url] = {"profile_url": profile_url}
+        key = self._normalize(profile_url)
+        if key not in self._users:
+            self._users[key] = {"profile_url": key}
         for field in LOCATION_FIELDS:
             if field in location and location[field] is not None:
-                self._users[profile_url][field] = location[field]
+                self._users[key][field] = location[field]
         self.save()
 
     def get_location(self, profile_url: str) -> Optional[Dict[str, Any]]:
         """Return cached location fields for a user, or None if not available."""
-        user = self._users.get(profile_url)
+        user = self._users.get(self._normalize(profile_url))
         if not user or not user.get("location_author_geoid"):
             return None
         return {field: user.get(field) for field in LOCATION_FIELDS}
 
     def get_stats(self, profile_url: str) -> Optional[Dict[str, Any]]:
         """Return cached stats (website_visits, author) for a user, or None."""
-        user = self._users.get(profile_url)
+        user = self._users.get(self._normalize(profile_url))
         if not user or user.get("website_visits") is None:
             return None
         return {

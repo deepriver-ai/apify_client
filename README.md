@@ -127,16 +127,16 @@ All data fetched from Apify is first translated into this common intermediate sc
 | `author_profile_bio` | Author's profile biography (from profile scraper, social media) |
 | `author_location_text` | Location display name — for news: `formatted_name` from source stats; for social: `locationName` from post's user, or similar field |
 | `author_location_id` | Location identifier — for news: `geoid` from source stats; for social: platform location ID (e.g. Instagram `locationId`) |
-| `location_author_formatted_name` | Formatted location name from geocoding/source stats |
-| `location_author_geoid` | Geoid of the author location (e.g. `_48416053`) |
-| `location_author_coords` | Coordinates of the author location |
-| `location_author_precision_level` | Precision level of the geocoded location |
-| `location_author_level_1` | Top-level administrative division name |
-| `location_author_level_1_id` | Top-level administrative division geoid |
-| `location_author_level_2` | Second-level administrative division name |
-| `location_author_level_2_id` | Second-level administrative division geoid |
-| `location_author_level_3` | Third-level administrative division name |
-| `location_author_level_3_id` | Third-level administrative division geoid |
+| `location_author_formatted_name` | Formatted location name from geocoding/source stats. Emitted as `location_author.formatted_name` in the final schema |
+| `location_author_geoid` | Geoid of the author location (e.g. `_48416053`). Emitted as `location_author.geoid` |
+| `location_author_coords` | Coordinates of the author location. Emitted as `location_author.coords` |
+| `location_author_precision_level` | Precision level of the geocoded location. Emitted as `location_author.precision_level` |
+| `location_author_level_1` | Top-level administrative division name. Emitted as `location_author.level_1` |
+| `location_author_level_1_id` | Top-level administrative division geoid. Emitted as `location_author.level_1_id` |
+| `location_author_level_2` | Second-level administrative division name. Emitted as `location_author.level_2` |
+| `location_author_level_2_id` | Second-level administrative division geoid. Emitted as `location_author.level_2_id` |
+| `location_author_level_3` | Third-level administrative division name. Emitted as `location_author.level_3` |
+| `location_author_level_3_id` | Third-level administrative division geoid. Emitted as `location_author.level_3_id` |
 | `location_ids` | List of geoids from geocoding (used by `matches_location()` before falling back to `author_location_id`) |
 | `language` | Detected language as ISO 639-1 code (e.g. `es`, `en`). Set by `detect_language()` or by actor from metadata |
 | `comments` | List of comment dicts, each with `comment_text`, `comment_author`, `comment_timestamp`, `comment_likes`. Empty list if comments not scraped |

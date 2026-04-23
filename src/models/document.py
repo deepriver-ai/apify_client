@@ -150,8 +150,22 @@ class Document:
         ``type`` is always ``"news"``; the inner ``message.type`` carries the
         actual platform (news, x, facebook, instagram, linkedin, ...).
         """
-        parsed = normalize_record(self.data, "News")
+        record = {**self.data, "location_author": self._nested_location_author()}
+        parsed = normalize_record(record, "News")
         return {"type": "news", "message": parsed}
+
+    def _nested_location_author(self) -> Dict[str, Any]:
+        """Build the nested location_author dict from flat location_author_* keys.
+
+        Intermediate writers (SourcesManagement, Post.enrich_location, UsersManagement)
+        still use flat prefixed keys; the final schema exposes them as a nested object.
+        """
+        prefix = "location_author_"
+        nested = {k[len(prefix):]: v for k, v in self.data.items() if k.startswith(prefix)}
+        existing = self.data.get("location_author")
+        if isinstance(existing, dict):
+            nested.update(existing)
+        return nested
 
     def enrich_location(self, **kwargs) -> None:
         """Enrich document with location data. Subclasses must implement."""

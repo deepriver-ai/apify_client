@@ -30,7 +30,7 @@ if __name__ == "__main__":
     if CURRENT_THEME:
         tasks = [t for t in tasks if t.theme == CURRENT_THEME]
         logger.info("Filtered to %d tasks with theme=%s", len(tasks), CURRENT_THEME)
-        
+
     for task in tasks:
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
@@ -50,8 +50,13 @@ if __name__ == "__main__":
 
             if task.publish:
                 for doc in expanded:
-                    final = doc.to_final_schema()
-                    publish(json.dumps(final, default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o)))
+                    try:
+                        final = doc.to_final_schema()
+                        publish(json.dumps(final, default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o)))
+                    except Exception as e:
+
+                        logger.error("Error publishing document: %s", e)
+                        logger.error("Document data: %s\n\n", doc.data)
                 logger.info("Published %d documents to RabbitMQ", len(expanded))
 
             else:
