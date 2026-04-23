@@ -30,6 +30,7 @@ if __name__ == "__main__":
     if CURRENT_THEME:
         tasks = [t for t in tasks if t.theme == CURRENT_THEME]
         logger.info("Filtered to %d tasks with theme=%s", len(tasks), CURRENT_THEME)
+        
     for task in tasks:
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
@@ -38,11 +39,20 @@ if __name__ == "__main__":
             documents = actor.search(task.search_params, **kwargs)
             logger.info("Got %d documents from %s (post-filter)", len(documents), task.actor_class)
 
+            # Expand each document into itself + its attached_news (if any),
+            # so linked articles attached to social posts are also published/saved.
+            expanded = []
+            for doc in documents:
+                expanded.append(doc)
+                attached = getattr(doc, "attached_news", None)
+                if attached is not None:
+                    expanded.append(attached)
+
             if task.publish:
-                for doc in documents:
+                for doc in expanded:
                     final = doc.to_final_schema()
                     publish(json.dumps(final, default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o)))
-                logger.info("Published %d documents to RabbitMQ", len(documents))
+                logger.info("Published %d documents to RabbitMQ", len(expanded))
 
             else:
                 runs_dir = os.path.join("cache", "runs")
@@ -53,12 +63,12 @@ if __name__ == "__main__":
                 filename = f"{task.actor_class}_id_{search_label}_{ts}.json"
 
                 filepath = os.path.join(runs_dir, filename)
-                results = [doc.to_final_schema() for doc in documents]
-                
+                results = [doc.to_final_schema() for doc in expanded]
+
                 with open(filepath, "w", encoding="utf-8") as f:
                     json.dump(results, f, ensure_ascii=False, indent=2, default=str)
-                
-                logger.info("Saved %d documents to %s", len(documents), filepath)
+
+                logger.info("Saved %d documents to %s", len(expanded), filepath)
 
         except Exception:
             logger.exception("Task failed: actor=%s search_params=%s", task.actor_class, task.search_params)

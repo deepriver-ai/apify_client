@@ -68,8 +68,12 @@ class Post(Document):
         self._raw = raw or {}
         self.attached_news = None
 
-    def fetch_attached_url(self) -> None:
-        """Fetch and parse the first external URL found in the post body.
+    def fetch_attached_url(self, url: str | None = None) -> None:
+        """Fetch and parse an attached URL and attach the resulting News to this post.
+
+        When ``url`` is provided, it is used directly. Otherwise the URL is
+        resolved from the raw API response's ``link`` field or by scanning the
+        post body for the first external (non-social, non-self) URL.
 
         Creates a News object from the URL, appends its article text to the
         post body tagged as attached_url_text, and stores the News object in
@@ -82,8 +86,9 @@ class Post(Document):
 
         body = self.data.get("body") or ""
 
-        # Prefer explicit link from raw API response (e.g. Facebook 'link' field) TODO: move to FacebookPagePosts
-        url = self._raw.get("link")
+        if not url:
+            # Prefer explicit link from raw API response (e.g. Facebook 'link' field) TODO: move to FacebookPagePosts
+            url = self._raw.get("link")
         if not url:
             own_url = self.data.get("url")
             url = _extract_first_external_url(body, own_url)

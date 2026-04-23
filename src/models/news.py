@@ -40,6 +40,8 @@ class News(Document):
         domain = cls.sources_manager.get_domain(final_url)
         cls.sources_manager.check_source(final_url, news.data.get("source"))
         if domain:
+            if news.data.get("source") is None:
+                news.data["source"] = cls.sources_manager.get_source_name(domain)
             location = cls.sources_manager.get_location(domain)
             for key, value in location.items():
                 if value is not None and news.data.get(key) is None:

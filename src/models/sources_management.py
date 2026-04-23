@@ -7,7 +7,7 @@ import os
 from typing import Any, Dict, List, Set
 
 from src.helpers.mongoconnection import mongoconn
-from src.helpers.str_fn import get_domain
+from src.helpers.str_fn import domainsplitter, get_domain
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,11 @@ def _build_domain_country_id(sources: List[Dict[str, Any]]) -> Dict[str, str]:
     }
 
 
+def _build_domain_source_name(sources: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Build a mapping of domain -> source name (``sitio`` in Mongo)."""
+    return {s["domain"]: s["sitio"] for s in sources if s.get("sitio")}
+
+
 def _build_domain_location(sources: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Build a mapping of domain -> full author location dict from source stats."""
     result = {}
@@ -74,6 +79,7 @@ def _build_domain_location(sources: List[Dict[str, Any]]) -> Dict[str, Dict[str,
 _sources = _load_sources()
 _known_sources = _build_known_sources(_sources)
 _domain_country_id = _build_domain_country_id(_sources)
+_domain_source_name = _build_domain_source_name(_sources)
 _domain_location = _build_domain_location(_sources)
 
 
@@ -110,6 +116,21 @@ class SourcesManagement:
     def get_country_id(self, domain: str) -> str | None:
         """Return the country_id for a domain, or None if not mapped."""
         return _domain_country_id.get(domain)
+
+    def get_source_name(self, domain: str) -> str | None:
+        """Return the source name for a domain.
+
+        Looks up the known ``sitio`` from Mongo; falls back to the domain
+        portion without its public-suffix TLD (``elfinanciero.com.mx`` →
+        ``elfinanciero``). Returns ``None`` for a falsy domain.
+        """
+        if not domain:
+            return None
+        name = _domain_source_name.get(domain)
+        if name:
+            return name
+        extracted = domainsplitter(domain)
+        return extracted.domain or domain
 
     def get_location(self, domain: str) -> Dict[str, Any]:
         """Return full author location dict for a domain, or all-None if not mapped."""

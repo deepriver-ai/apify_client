@@ -29,7 +29,8 @@ def default_comment_id(obj: Dict[str, Any], context: Optional[Dict[str, Any]] = 
     (first 8 hex chars of MD5), and formats the timestamp as %Y%m%d%H%M.
     """
     record = record or {}
-    post_url = ((obj or {}).get("message") or {}).get("url") or ""
+    #post_url = ((obj or {}).get("message") or {}).get("url") or ""
+    post_url = (obj or {}).get("url") or ""
     author = record.get("comment_author") or ""
     author_hash = hashlib.md5(author.encode()).hexdigest()[:8]
     ts = record.get("comment_timestamp")
@@ -107,6 +108,7 @@ SOURCE_EXTRA_SCHEMA: Dict[str, Dict[str, Any]] = {
 
 # Schema for SourceExtraStats (nested in SourceExtra)
 SOURCE_EXTRA_STATS_SCHEMA: Dict[str, Dict[str, Any]] = {
+    "at_date": {"type": datetime, "default": date_now},
     "article_value": {"type": int},
     "website_visits": {"type": int},
     "likes": {"type": int},

@@ -8,6 +8,7 @@ from src.actors.actor import ApifyActor, PERIOD_DAYS
 from src.actors.facebook.comments import FacebookCommentsActor
 from src.actors.facebook.profiles import FacebookProfileActor
 from src.models.facebook_post import FacebookPost, _extract_facebook_page_name
+from src.models.post import _extract_first_external_url
 
 # Facebook Posts Scraper
 # https://apify.com/apify/facebook-posts-scraper
@@ -62,6 +63,36 @@ class FacebookPagePostsActor(ApifyActor):
         posts = [FacebookPost.from_facebook(item) for item in raw_results]
 
         return self.process_documents(posts, **kwargs)
+
+    def process_documents(self, documents: List, **kwargs) -> List:
+        """Run the base pipeline, then fall back to the first comment for an
+        attached URL when the post body did not yield one.
+
+        Facebook pages frequently drop the article link into the first comment
+        rather than the post body, so after comments have been scraped we
+        retry the attach step for any post still missing ``attached_news``.
+        """
+        documents = super().process_documents(documents, **kwargs)
+
+        if not kwargs.get("fetch_attached_url"):
+            return documents
+
+        for doc in documents:
+            if doc.attached_news is not None:
+                continue
+            comments = doc.data.get("comments") or []
+            if not comments:
+                continue
+            first_comment_text = comments[0].get("comment_text") or ""
+            if not first_comment_text:
+                continue
+            url = _extract_first_external_url(first_comment_text, doc.data.get("url"))
+            if not url:
+                continue
+            logger.info("Fetching attached URL from first comment: %s", url)
+            doc.fetch_attached_url(url=url)
+
+        return documents
 
     def _enrich_content(self, documents: List, **kwargs) -> List:
         """Enrich post content: fetch attached URLs, download media, extract text.
