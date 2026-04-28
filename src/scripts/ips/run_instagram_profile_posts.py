@@ -14,8 +14,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-from openai import OpenAI
-
 from src.actors.instagram.profile_posts import InstagramProfilePostsActor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -30,8 +28,21 @@ search_params = [
     "https://www.instagram.com/shuya_official/"
 ]
 
+search_params = [
+'https://www.instagram.com/p/DWVIVAIjFQf/',
+'https://www.instagram.com/p/DWEBN3_EaxR/',
+'https://www.instagram.com/reel/DVqHLokkT33/',
+'https://www.instagram.com/reel/DCLtx_SPSf7/',
+'https://www.instagram.com/reel/DP1R6zckbzk/',
+'https://www.instagram.com/reel/DWncabjAOsj/',
+'https://www.instagram.com/reel/DW4iBu_Ewxb/',
+'https://www.instagram.com/reel/DUqFjjBDL5H/',
+'https://www.instagram.com/reel/DXUMwjJkfG9/',
+'https://www.instagram.com/reel/DUVn6KdjE4-/'
+]
+
 # Filtering
-task_id = "ig_profile_te"          # unique task identifier (used for filter cache)
+task_id = "ig_post_tst"          # unique task identifier (used for filter cache)
 country_id = None  #"_484"         # Mexico (geoid prefix); None to skip location filter
 language = None  #"es"             # ISO 639-1 code; None to skip language filter
 period = None                      # "d" (1 day), "w" (7 days), "m" (30 days); None to skip
@@ -56,7 +67,7 @@ stats_max_age_days = 90            # skip profiles with stats fresher than this
 
 # Comments
 get_comments = True                # scrape comments for each post
-max_comments = 25                  # max comments per post
+max_comments = 5                   # max comments per post
 
 # Apify actor params
 results_type = "posts"             # "posts", "reels", "tagged"
@@ -106,6 +117,10 @@ print(f"\nGot {len(documents)} documents (post-filter)")
 # Save results
 # ------------------------------------------------------------------
 
+ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+runs_dir = os.path.join("cache", "runs")
+os.makedirs(runs_dir, exist_ok=True)
+
 if publish:
     from src.helpers.rabbitmq import close_client, publish as rmq_publish
     for doc in documents:
@@ -113,108 +128,80 @@ if publish:
     close_client()
     print(f"Published {len(documents)} documents to RabbitMQ")
 else:
-    runs_dir = os.path.join("cache", "runs")
-    os.makedirs(runs_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"instagram_profile_posts_id_{task_id}_{ts}.json"
     filepath = os.path.join(runs_dir, filename)
-
     results = [doc.to_final_schema() for doc in documents]
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2, default=str)
-
     print(f"Saved {len(documents)} documents to {filepath}")
 
 # ------------------------------------------------------------------
-# Post-processing: describe videos with LLM
+# Post-processing: describe videos with Gemini, section by section
 # ------------------------------------------------------------------
 
-#with open("/Users/oscarcuellar/Downloads/lulupiggie_test.json", "r", encoding="utf-8") as f:
-with open("/Users/oscarcuellar/Downloads/lulupiggie_shuya_20.json", "r", encoding="utf-8") as f:
-    documents = json.load(f)
+# When running interactively against a previously saved set of docs, swap the
+# block above for a json.load() of cache/runs/*.json. By default we operate on
+# the in-memory `documents` produced by `actor.search()` above.
 
-
-VIDEO_DESCRIPTION_PROMPT = """You are analyzing an Instagram video post. Describe the video content in detail, including:
-What is shown:
-    - label: theme of the video, list of keywords (e.g. 'romantic love', 'friendship', 'enjoyment oneself', 'tricking others', 'funny')
-    - objects: list of objects
-    - setting: settings of scenes
-    - actions
-    - text_overlays
-    - plot: Describe the plot/image of the post within 100 words
-    - interactions: Describe the interactions between the characters if there are more than one
-    - visual_style: list of keywords including Digital illustration, animations, hand painting, mascot, product photo, animation, open to other suggested keywords that you see
-    - illustration: what art/drawing style is it? (concrete line / no line etc)
-    - background_image: What is the background image? Pure color, motif, scene etc
-    - message: What is the main character's positioning or messaging?
-    
-- For each character, describe it (list of characters):
-    - description: description of the character
-    - actions
-    - personality
-    - theme: Is there a common theme underlying the content of the character?
-    - emotions: (happy, lazy, gloomy, etc)
-    - key_descriptives: Key descriptives of the IP: Cute/Kawaii, lazy, chilled, funny, moody, dumb, etc.
-    - iconic_elements: What is visually iconic about this IP compared to others
-    - colors: Primary and secondary colors
-
-Respond in English.
-
-Caption: {caption}
-
-Return a json with a description for each of the keys
-Answer only with the json, no other text or interaction.
-Describe the video:"""
-
-import time
+import sys                                                                           
+sys.path.insert(0, '/Users/oscarcuellar/ocn/media/schema_tools/src')
 
 from google import genai
-from google.genai import types as genai_types
+
+from src.scripts.ips.ai_describe import analyse_post
 
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-GEMINI_MODEL = "gemini-2.5-pro"
 
-
-def _wait_for_active(file_obj, timeout_s: int = 300, poll_s: float = 2.0):
-    """Poll the Gemini file until state is ACTIVE (or FAILED/timeout)."""
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        f = gemini_client.files.get(name=file_obj.name)
-        if f.state.name == "ACTIVE":
-            return f
-        if f.state.name == "FAILED":
-            raise RuntimeError(f"Gemini file processing failed: {f.name}")
-        time.sleep(poll_s)
-    raise TimeoutError(f"Gemini file {file_obj.name} did not become ACTIVE within {timeout_s}s")
-
-video_descriptions = {}
-
+records = []
 for doc in documents:
-    video_path = doc.get("video_filename")
-    if post_url in video_descriptions or not video_path or not os.path.exists(video_path):
-        continue
+    doc_data = doc if isinstance(doc, dict) else getattr(doc, "data", {})
+    record = analyse_post(gemini_client, doc_data)
+    if record is not None:
+        records.append(record)
 
-    post_url = doc.get("url", "unknown")
-    caption = doc.get("body") or ""
-    print(f"\nDescribing video for {post_url} ...")
 
-    # Upload the video file (Gemini natively supports video input)
-    uploaded = gemini_client.files.upload(file=video_path)
-    uploaded = _wait_for_active(uploaded)
 
-    response = gemini_client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[
-            uploaded,
-            VIDEO_DESCRIPTION_PROMPT.format(caption=caption),
-        ],
-        config=genai_types.GenerateContentConfig(temperature=0.3),
-    )
+analysis_path = os.path.join(runs_dir, f"instagram_profile_posts_analysis_{task_id}_{ts}.json")
+with open(analysis_path, "w", encoding="utf-8") as f:
+    json.dump(records, f, ensure_ascii=False, indent=2, default=str)
+print(f"Saved {len(records)} analyses to {analysis_path}")
 
-    description = response.text
-    video_descriptions[post_url] = description
-    print(f"  -> {description[:200]}...")
+# Excel export — flatten nested dicts with dotted paths; lists of dicts (e.g.
+# `characters`) become numbered subkeys: characters.1.outlook, characters.2.outlook, …
+# Scalar lists are joined with " | ". One row per record, single sheet.
+import pandas as pd
+from datetime import datetime
 
-print(f"\nDescribed {len(video_descriptions)} videos")
 
-# The `documents` and `video_descriptions` dicts are available for interactive inspection in ipython
+def _excel_safe(v):
+    if isinstance(v, datetime) and v.tzinfo is not None:
+        return v.replace(tzinfo=None)
+    return v
+
+
+def _flatten_record(d, prefix="", out=None):
+    if out is None:
+        out = {}
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            _flatten_record(v, key, out)
+        elif isinstance(v, list):
+            if v and isinstance(v[0], dict):
+                for i, item in enumerate(v, start=1):
+                    _flatten_record(item, f"{key}.{i}", out)
+            else:
+                out[key] = " | ".join("" if x is None else str(x) for x in v)
+        else:
+            out[key] = _excel_safe(v)
+    return out
+
+
+flat_records = [_flatten_record(r) for r in records]
+
+xlsx_path = os.path.join('~/Downloads', f"instagram_profile_posts_analysis_{task_id}_{ts}.xlsx")
+df = pd.DataFrame(flat_records)
+df.to_excel(xlsx_path, sheet_name="posts", index=False)
+print(f"Saved {len(records)} analyses to {xlsx_path}")
+
+# `documents` and `records` are available for interactive inspection in ipython.

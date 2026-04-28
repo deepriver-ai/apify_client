@@ -19,7 +19,7 @@ class InstagramPost(Post):
             "timestamp": item.get("timestamp"),
             "source": "Instagram",
             "body": item.get("caption"),
-            "title": item.get("caption", item.get("ownerFullName"))[:80],
+            "title": item.get("caption", item.get("ownerFullName", ""))[:80],
             "url": item.get("url"),
             "media_urls": _collect_media_urls(item),
             "type": "instagram",
