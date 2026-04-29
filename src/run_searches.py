@@ -15,7 +15,7 @@ from src.models.crawl_task import CrawlTask, load_tasks
 logger = logging.getLogger(__name__)
 
 DEFAULT_TASKS_CSV = "tasks.xlsx"
-CURRENT_THEME = "orizaba"
+CURRENT_THEME = "queretaro"
 
 
 
@@ -32,6 +32,7 @@ if __name__ == "__main__":
         logger.info("Filtered to %d tasks with theme=%s", len(tasks), CURRENT_THEME)
 
     for task in tasks:
+        task.max_results = task.max_results // 3
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
             actor = get_actor(task.actor_class)
