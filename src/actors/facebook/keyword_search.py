@@ -6,7 +6,8 @@ from typing import Any, Dict, List
 
 from src.actors.actor import PERIOD_DAYS, ApifyActor
 from src.actors.facebook.comments import FacebookCommentsActor
-from src.models.facebook_post import FacebookPost
+from src.actors.facebook.profiles import FacebookProfileActor
+from src.models.facebook_post import FacebookPost, _extract_facebook_page_name
 
 # Facebook Search Posts
 # https://apify.com/scrapeforge/facebook-search-posts
@@ -73,11 +74,53 @@ class FacebookKeywordSearchActor(ApifyActor):
         return documents
 
     def _enrich_user_author(self, documents: List, **kwargs) -> List:
-        """No-op: scrapeforge search results already include author name and
-        profile URL; scraping a full page per unique author for keyword-filtered
-        results would inflate cost with marginal value."""
+        """Apply cached stats; when ``enrich_followers`` is set, bulk-scrape
+        stale page profiles via ``FacebookProfileActor`` and persist results to
+        ``UsersManagement``. Mirrors ``FacebookPagePostsActor._enrich_user_author``.
+        """
+        max_age_days = kwargs.get("stats_max_age_days", 90)
+
+        profiles_to_scrape: Dict[str, str] = {}  # profile_url → page_name
         for doc in documents:
             doc.apply_cached_user_author()
+            if doc.needs_user_author_update(max_age_days):
+                profile_url = doc.data.get("profile_url", "")
+                page_name = _extract_facebook_page_name(profile_url)
+                if page_name:
+                    profiles_to_scrape[profile_url] = page_name
+
+        if not profiles_to_scrape or not kwargs.get("enrich_followers"):
+            if not kwargs.get("enrich_followers"):
+                logger.info("enrich_followers not set, applied cached stats only for %d posts", len(documents))
+            else:
+                logger.info("All %d profiles have fresh stats, skipping scraper", len(documents))
+            return documents
+
+        page_urls = list(set(profiles_to_scrape.keys()))
+        logger.info("Scraping profiles for %d Facebook pages", len(page_urls))
+
+        profile_actor = FacebookProfileActor(self.client)
+        raw_profiles = profile_actor.scrape_pages(page_urls)
+
+        profiles_by_page: Dict[str, Dict[str, Any]] = {}
+        for profile in raw_profiles:
+            page_url = profile.get("pageUrl", "")
+            pname = _extract_facebook_page_name(page_url)
+            if pname:
+                profiles_by_page[pname] = profile
+
+        for doc in documents:
+            profile_url = doc.data.get("profile_url", "")
+            page_name = profiles_to_scrape.get(profile_url)
+            if not page_name:
+                continue
+            profile_data = profiles_by_page.get(page_name)
+            if not profile_data:
+                continue
+            mapped = FacebookProfileActor.map_profile(profile_data)
+            doc.save_user_author_stats(mapped)
+
+        logger.info("Enriched %d profiles with page stats", len(raw_profiles))
         return documents
 
     def _enrich_comments(self, documents: List, **kwargs) -> List:

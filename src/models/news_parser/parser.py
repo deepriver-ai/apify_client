@@ -45,6 +45,7 @@ def _try_newsplease(html: str, url: str) -> Optional[Dict[str, Any]]:
             "body": parsed.get("maintext") or "",
             "author": _first_author(parsed.get("authors")),
             "media_urls": [parsed["image_url"]] if parsed.get("image_url") else [],
+            "timestamp": parsed.get("date_publish"),
         }
     except Exception as ex:
         logger.warning("NewsPlease failed for %s: %s", url, ex)
@@ -65,6 +66,7 @@ def _try_newspaper(html: str, url: str) -> Optional[Dict[str, Any]]:
             "body": article.text or "",
             "author": article.authors[0] if article.authors else None,
             "media_urls": [article.top_image] if article.top_image else [],
+            "timestamp": article.publish_date,
         }
     except Exception as ex:
         logger.warning("newspaper failed for %s: %s", url, ex)
@@ -73,7 +75,7 @@ def _try_newspaper(html: str, url: str) -> Optional[Dict[str, Any]]:
 
 def _fill_from_newspaper(result: Dict[str, Any], html: str, url: str) -> None:
     """Fill missing fields in a NewsPlease result using newspaper."""
-    fields_to_check = ["title", "body", "author"]
+    fields_to_check = ["title", "body", "author", "timestamp"]
     if all(_field_ok(result, f) for f in fields_to_check):
         return
 
@@ -93,6 +95,8 @@ def _fill_from_newspaper(result: Dict[str, Any], html: str, url: str) -> None:
             result["author"] = article.authors[0]
         if not result.get("media_urls") and article.top_image:
             result["media_urls"] = [article.top_image]
+        if not _field_ok(result, "timestamp") and article.publish_date:
+            result["timestamp"] = article.publish_date
     except Exception as ex:
         logger.warning("newspaper fill failed for %s: %s", url, ex)
 
@@ -125,6 +129,9 @@ def _parse_with_llm(html: str, url: str, override: bool = False) -> Optional[Dic
                         "the article (hero image, inline editorial photos). "
                         "Exclude site logos, icons, ad banners, author avatars, and UI elements. "
                         "Empty list [] if none found.\n"
+                        '  "published_at": (string|null) The article publication date in ISO 8601 format '
+                        '(e.g. "2024-03-15T10:30:00" or "2024-03-15"). Look for <meta> tags, JSON-LD, '
+                        "or <time> elements. null if not found.\n"
                         "}\n\n"
                         "If a field cannot be determined, use null for strings and [] for media_urls. "
                         "Return ONLY the JSON object, no extra text."
@@ -154,6 +161,7 @@ def _parse_with_llm(html: str, url: str, override: bool = False) -> Optional[Dic
                 "body": parsed.get("body") or "",
                 "author": parsed.get("author"),
                 "media_urls": parsed.get("media_urls") or [],
+                "timestamp": parsed.get("published_at"),
             }
     except Exception as ex:
         logger.warning("LLM parse failed for %s: %s", url, ex)

@@ -90,6 +90,7 @@ class News(Document):
                     self.data["body"] = parsed.get("body") or self.data["body"]
                     self.data["author"] = parsed.get("author") or self.data["author"]
                     self.data["media_urls"] = parsed.get("media_urls") or self.data["media_urls"]
+                    self.data["timestamp"] = parsed.get("timestamp") or self.data["timestamp"]
                 else:
                     logger.warning("Could not parse article for %s", parse_url)
             else:

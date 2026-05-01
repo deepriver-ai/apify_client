@@ -26,7 +26,7 @@ News article model (`src/models/news.py`). Inherits from `Document`.
 
 - `News.from_url(url)` — class method that creates a `News` from any URL, fetches and parses it. Returns the `News` object if successful, `None` if fetch/parse fails. Used by `fetch_attached_url` to parse linked articles from social media posts
 - `News.from_google_news(item)` — class method that creates a `News` from a raw Google News Apify result, mapping `link`/`url`, `title`, `description`, `image`, `publishedAt`, and `source` into the intermediate schema. Pure data mapping — no enrichment or source lookups
-- `News.fetch_and_parse()` — downloads the article HTML via `fetch_html(url)`, unpacking the `(html, final_url)` tuple. Updates `self.data["url"]` to the final URL when it differs from the original (handling shortened/redirected URLs). Passes the final URL to `extract_article(html, final_url)`. Updates `title`, `body`, `author`, and `media_urls` in `self.data`. Returns `True` on success, `False` on failure
+- `News.fetch_and_parse()` — downloads the article HTML via `fetch_html(url)`, unpacking the `(html, final_url)` tuple. Updates `self.data["url"]` to the final URL when it differs from the original (handling shortened/redirected URLs). Passes the final URL to `extract_article(html, final_url)`. Updates `title`, `body`, `author`, `media_urls`, and `timestamp` in `self.data` (only overwriting when the parser returned a non-empty value). Returns `True` on success, `False` on failure
 - `News.enrich_location(sources)` — sets all author location fields (`author_location_text`, `author_location_id`, `location_author_formatted_name`, `location_author_geoid`, `location_author_coords`, `location_author_precision_level`, `location_author_level_1`/`level_2`/`level_3` and their IDs) from `SourcesManagement` domain lookup. Also calls `check_source()` to track unknown domains
 - `News` uses the inherited `Document.to_final_schema()` — `data["type"]` is `"news"`, so the envelope wraps as `{"type": "news", "message": parsed_news}`
 
@@ -37,7 +37,7 @@ Base social media post model (`src/models/post.py`). Inherits from `Document`. P
 Posts share the same final envelope as News: `{"type": "news", "message": parsed}` where `parsed` is validated against `NEWS_SCHEMA`.
 
 - `Post.attached_news` — `News | None` attribute (initialized to `None`). Stores the `News` object created when a linked article is successfully fetched via `fetch_attached_url()`
-- `Post.fetch_attached_url(sources_manager)` — extracts the first external URL from the post body, fetches and parses it via `News.from_url()`, appends article text as `\n\n attached_url_text: <text>`, optionally copies the source location to the post, and stores the resulting `News` object on `self.attached_news`
+- `Post.fetch_attached_url(sources_manager)` — extracts the first external URL from the post body, fetches and parses it via `News.from_url()`, appends article text as `\n\n attached_url_text: <text>`, optionally copies the source location to the post, stores the resulting `News` object on `self.attached_news`, and falls back to the parent post's `timestamp` when the fetched article still has no `timestamp` after parsing (the parser surfaces a date when one is present in the HTML, but some articles lack it) so the attached news isn't published with a null date
 - `Post._extract_first_external_url()` — finds the first non-platform URL in the post body
 - `Post.enrich_location(**kwargs)` — geocodes body text to populate `location_ids` and `location_author_*` fields. If a `users_manager` is provided in kwargs and already has cached location data for the user (by `profile_url`), applies cached data and skips geocoding. When geocoding finds a city-level location, saves it to `UsersManagement` for future reuse
 - `Post.apply_cached_user_author()` — applies cached `website_visits`, `author_full_name`, `author_profile_bio`, and `author_location_text` from `UsersManagement` to the post's intermediate schema
@@ -98,6 +98,7 @@ Keyed by `profile_url` (e.g. `https://www.instagram.com/username/`). Stores per-
 - `Post.enrich_location(**kwargs)` — checks `UsersManagement` for cached user location before geocoding; saves new geocoded locations back
 - `InstagramHashtagActor._enrich_user_author()` — uses `UsersManagement` to skip fresh profiles and save scraped profile data (followers, bio, full name)
 - `FacebookPagePostsActor._enrich_user_author()` — uses `UsersManagement` to skip fresh profiles and save scraped page profile data (followers, bio, full name, location text via `FacebookProfileActor`)
+- `FacebookKeywordSearchActor._enrich_user_author()` — same pattern as `FacebookPagePostsActor`: applies cached stats always, and when `enrich_followers=True` bulk-scrapes stale pages via `FacebookProfileActor` and persists to `UsersManagement`
 - `Post` class-level singleton `users_manager` provides access to all pipeline stages
 
 
@@ -360,7 +361,7 @@ Current actors:
 Used by `News.fetch_and_parse()` to download and extract full article content.
 
 - **`load_url.py`** — `fetch_html(url)`: streaming HTTP download, 10 MB size guard, 15s timeout, 3 retries, browser UA headers. Returns a tuple `(html, final_url)` where `final_url` is the URL after following redirects (`r.url` from requests). Returns `(None, None)` on failure.
-- **`parser.py`** — `extract_article(html, url)`: three-tier extraction (NewsPlease → newspaper4k → LLM). Returns `{title, body, author, media_urls}` or `None`. Requires body >= 200 chars.
+- **`parser.py`** — `extract_article(html, url)`: three-tier extraction (NewsPlease → newspaper4k → LLM). Returns `{title, body, author, media_urls, timestamp}` or `None`. `timestamp` comes from NewsPlease's `date_publish`, newspaper's `publish_date`, or the LLM's `published_at` (ISO 8601). Requires body >= 200 chars.
 
 ### HTML cleaner (`src/helpers/html_cleaner.py`)
 

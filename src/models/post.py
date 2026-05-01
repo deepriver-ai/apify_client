@@ -103,6 +103,9 @@ class Post(Document):
 
         self.attached_news = news
 
+        if news.data.get("timestamp") is None:
+            news.data["timestamp"] = self.data.get("timestamp")
+
         article_body = news.data.get("body")
         if article_body:
             self.data["body"] = body + "\n\n attached_url_text: " + article_body

@@ -8,6 +8,8 @@ import os
 import sys
 from datetime import datetime
 
+from pika.exceptions import AMQPError
+
 from src.actors import get_actor
 from src.helpers.rabbitmq import close_client, publish
 from src.models.crawl_task import CrawlTask, load_tasks
@@ -32,7 +34,6 @@ if __name__ == "__main__":
         logger.info("Filtered to %d tasks with theme=%s", len(tasks), CURRENT_THEME)
 
     for task in tasks:
-        task.max_results = task.max_results // 3
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
             actor = get_actor(task.actor_class)
@@ -54,6 +55,8 @@ if __name__ == "__main__":
                     try:
                         final = doc.to_final_schema()
                         publish(json.dumps(final, default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o)))
+                    except AMQPError:
+                        raise
                     except Exception as e:
 
                         logger.error("Error publishing document: %s", e)
@@ -76,6 +79,9 @@ if __name__ == "__main__":
 
                 logger.info("Saved %d documents to %s", len(expanded), filepath)
 
+        except AMQPError:
+            logger.error("RabbitMQ connection lost — aborting run")
+            raise
         except Exception:
             logger.exception("Task failed: actor=%s search_params=%s", task.actor_class, task.search_params)
 
