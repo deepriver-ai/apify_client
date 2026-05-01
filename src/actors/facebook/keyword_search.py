@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from src.actors.actor import PERIOD_DAYS, ApifyActor
 from src.actors.facebook.comments import FacebookCommentsActor
-from src.actors.facebook.profiles import FacebookProfileActor
+from src.actors.facebook.profiles import FacebookProfileActor, index_profiles_by_page_name
 from src.models.facebook_post import FacebookPost, _extract_facebook_page_name
 
 # Facebook Search Posts
@@ -67,27 +67,74 @@ class FacebookKeywordSearchActor(ApifyActor):
         posts = [FacebookPost.from_facebook_search(item) for item in raw_results]
         return self.process_documents(posts, **kwargs)
 
+    def process_documents(self, documents: List, **kwargs) -> List:
+        """Override pipeline order: run ``_filter_llm`` right after
+        ``_filter_language`` so LLM-rejected posts skip the expensive
+        author/location enrichment and comment scraping stages.
+        """
+        override = kwargs.get("override_filters", False)
+        task_id = kwargs.get("task_id", "")
+        all_docs = documents
+
+        if not override and task_id:
+            before = len(documents)
+            documents = [
+                doc for doc in documents
+                if self._filter_cache.get(self._filter_cache_key(doc, task_id)) is not False
+            ]
+            if len(documents) < before:
+                logger.info("Filter cache: %d → %d documents (skipped previously filtered for task %s)", before, len(documents), task_id)
+
+        documents = self._filter_keywords(documents, **kwargs)
+        documents = self._filter_date(documents, **kwargs)
+        documents = self._enrich_content(documents, **kwargs)
+        documents = self._filter_language(documents, **kwargs)
+        documents = self._filter_llm(documents, **kwargs)
+        documents = self._filter_llm(documents, snippet_max_len=2500, **kwargs)
+        documents = self._enrich_user_author(documents, **kwargs)
+        documents = self._enrich_location(documents, **kwargs)
+        documents = self._filter_location(documents, **kwargs)
+        documents = self._enrich_comments(documents, **kwargs)
+
+        if task_id:
+            survived = {id(doc) for doc in documents}
+            for doc in all_docs:
+                key = self._filter_cache_key(doc, task_id)
+                self._filter_cache[key] = id(doc) in survived
+            self._save_filter_cache()
+
+        return documents
+
     def _enrich_content(self, documents: List, **kwargs) -> List:
         if kwargs.get("fetch_attached_url"):
             for doc in documents:
-                doc.fetch_attached_url()
+                external_url = doc._raw.get("external_url")
+                doc.fetch_attached_url(url=external_url)
         return documents
 
     def _enrich_user_author(self, documents: List, **kwargs) -> List:
         """Apply cached stats; when ``enrich_followers`` is set, bulk-scrape
         stale page profiles via ``FacebookProfileActor`` and persist results to
         ``UsersManagement``. Mirrors ``FacebookPagePostsActor._enrich_user_author``.
+
+        ``enrich_author_after_likes`` (int, optional): only scrape profiles for
+        posts whose ``likes`` exceed this threshold. Cached stats still apply
+        to all posts regardless of likes.
         """
         max_age_days = kwargs.get("stats_max_age_days", 90)
+        likes_threshold = kwargs.get("enrich_author_after_likes")
 
         profiles_to_scrape: Dict[str, str] = {}  # profile_url → page_name
         for doc in documents:
             doc.apply_cached_user_author()
-            if doc.needs_user_author_update(max_age_days):
-                profile_url = doc.data.get("profile_url", "")
-                page_name = _extract_facebook_page_name(profile_url)
-                if page_name:
-                    profiles_to_scrape[profile_url] = page_name
+            if not doc.needs_user_author_update(max_age_days):
+                continue
+            if likes_threshold is not None and (doc.data.get("likes") or 0) <= likes_threshold:
+                continue
+            profile_url = doc.data.get("profile_url", "")
+            page_name = _extract_facebook_page_name(profile_url)
+            if page_name:
+                profiles_to_scrape[profile_url] = page_name
 
         if not profiles_to_scrape or not kwargs.get("enrich_followers"):
             if not kwargs.get("enrich_followers"):
@@ -102,12 +149,7 @@ class FacebookKeywordSearchActor(ApifyActor):
         profile_actor = FacebookProfileActor(self.client)
         raw_profiles = profile_actor.scrape_pages(page_urls)
 
-        profiles_by_page: Dict[str, Dict[str, Any]] = {}
-        for profile in raw_profiles:
-            page_url = profile.get("pageUrl", "")
-            pname = _extract_facebook_page_name(page_url)
-            if pname:
-                profiles_by_page[pname] = profile
+        profiles_by_page = index_profiles_by_page_name(raw_profiles)
 
         for doc in documents:
             profile_url = doc.data.get("profile_url", "")
@@ -124,14 +166,24 @@ class FacebookKeywordSearchActor(ApifyActor):
         return documents
 
     def _enrich_comments(self, documents: List, **kwargs) -> List:
+        """Scrape comments for posts that have any.
+
+        ``get_comments_after_likes`` (int, optional): only scrape comments for
+        posts whose ``likes`` exceed this threshold.
+        """
         if not kwargs.get("get_comments"):
             return documents
 
         max_comments = kwargs.get("max_comments", 15)
-        post_urls = [
-            doc.data.get("url") for doc in documents
-            if doc.data.get("url") and (doc.data.get("n_comments") or 0) > 0
-        ]
+        likes_threshold = kwargs.get("get_comments_after_likes")
+        post_urls: List[str] = []
+        for doc in documents:
+            url = doc.data.get("url")
+            if not url or (doc.data.get("n_comments") or 0) <= 0:
+                continue
+            if likes_threshold is not None and (doc.data.get("likes") or 0) <= likes_threshold:
+                continue
+            post_urls.append(url)
         if not post_urls:
             return documents
 

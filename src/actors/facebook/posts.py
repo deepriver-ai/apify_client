@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from src.actors.actor import ApifyActor, PERIOD_DAYS
 from src.actors.facebook.comments import FacebookCommentsActor
-from src.actors.facebook.profiles import FacebookProfileActor
+from src.actors.facebook.profiles import FacebookProfileActor, index_profiles_by_page_name
 from src.models.facebook_post import FacebookPost, _extract_facebook_page_name
 from src.models.post import _extract_first_external_url
 
@@ -209,13 +209,10 @@ class FacebookPagePostsActor(ApifyActor):
         profile_actor = FacebookProfileActor(self.client)
         raw_profiles = profile_actor.scrape_pages(page_urls)
 
-        # Index results by page name
-        profiles_by_page: Dict[str, Dict[str, Any]] = {}
-        for profile in raw_profiles:
-            page_url = profile.get("pageUrl", "")
-            pname = _extract_facebook_page_name(page_url)
-            if pname:
-                profiles_by_page[pname] = profile
+        # Index results by every known page-name representation so the
+        # lookup succeeds regardless of which key on the profile matches
+        # the post's profile_url.
+        profiles_by_page = index_profiles_by_page_name(raw_profiles)
 
         # Map results back to posts
         for doc in documents:

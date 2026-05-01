@@ -25,6 +25,13 @@ _BLACKLISTED_DOMAINS = {
     "pinterest.com",
     "whatsapp.com", "wa.me",
     "t.me",
+    "goo.gl",  # Google URL shortener (covers maps.app.goo.gl, etc.) — never news
+}
+
+# Domains that are only blacklisted under specific path prefixes (e.g.
+# google.com hosts a lot of things, but /maps URLs are never news articles).
+_BLACKLISTED_PATH_PREFIXES: Dict[str, tuple] = {
+    "google.com": ("/maps",),
 }
 
 
@@ -97,11 +104,24 @@ class SourcesManagement:
     # --- Blacklist ---
 
     def is_blacklisted(self, url: str) -> bool:
-        """Return True if the URL's domain is a known non-news platform."""
+        """Return True if the URL is a known non-news platform.
+
+        Matches by domain (full or subdomain of an entry in
+        ``_BLACKLISTED_DOMAINS``), or by domain+path prefix for entries in
+        ``_BLACKLISTED_PATH_PREFIXES`` (e.g. ``google.com/maps``).
+        """
         domain = get_domain(url)
         if not domain:
             return False
-        return any(domain == bl or domain.endswith("." + bl) for bl in _BLACKLISTED_DOMAINS)
+        if any(domain == bl or domain.endswith("." + bl) for bl in _BLACKLISTED_DOMAINS):
+            return True
+        from urllib.parse import urlparse
+        path = urlparse(url).path or ""
+        for bl_domain, prefixes in _BLACKLISTED_PATH_PREFIXES.items():
+            if domain == bl_domain or domain.endswith("." + bl_domain):
+                if any(path.startswith(p) for p in prefixes):
+                    return True
+        return False
 
     # --- Source lookups ---
 

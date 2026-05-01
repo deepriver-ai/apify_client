@@ -77,7 +77,13 @@ class FacebookPost(Post):
             or item.get("permalink")
         )
 
-        body = item.get("text") or item.get("content") or ""
+        body = (
+            item.get("message_rich")
+            or item.get("message")
+            or item.get("text")
+            or item.get("content")
+            or ""
+        )
 
         timestamp = item.get("timestamp") or item.get("created_time") or item.get("posted_at")
         if isinstance(timestamp, (int, float)):
@@ -90,11 +96,20 @@ class FacebookPost(Post):
         media_urls = _collect_facebook_search_media_urls(item)
 
         reactions = item.get("reactions") or {}
-        likes = (
-            item.get("likes_count")
-            or item.get("reactions_count")
-            or reactions.get("like")
-            or reactions.get("total")
+        likes = _first_not_none(
+            item.get("likes_count"),
+            item.get("reactions_count"),
+            reactions.get("like"),
+            reactions.get("total"),
+        )
+        shares = _first_not_none(
+            item.get("shares_count"),
+            item.get("shares"),
+            item.get("reshare_count"),
+        )
+        n_comments = _first_not_none(
+            item.get("comments_count"),
+            item.get("comments"),
         )
 
         data = cls._empty_data()
@@ -109,28 +124,47 @@ class FacebookPost(Post):
             "author": author_name,
             "author_full_name": author_name,
             "likes": likes,
-            "shares": item.get("shares_count") or item.get("shares"),
-            "n_comments": item.get("comments_count") or item.get("comments"),
+            "shares": shares,
+            "n_comments": n_comments,
             "profile_url": profile_url,
             "post_type": post_type,
         })
         return cls(data=data, raw=item)
 
 
+def _first_not_none(*values):
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
 def _infer_facebook_search_post_type(item: Dict[str, Any]) -> str:
-    if item.get("video_url") or item.get("videos"):
+    if item.get("video") or item.get("video_files") or item.get("video_url") or item.get("videos"):
         return "Video"
-    if item.get("images") or item.get("image_url"):
+    if (
+        item.get("image")
+        or item.get("image_url")
+        or item.get("images")
+        or item.get("album_preview")
+    ):
         return "Photo"
     return "Status"
 
 
 def _collect_facebook_search_media_urls(item: Dict[str, Any]) -> List[str]:
     urls: List[str] = []
-    for key in ("image_url", "video_url", "thumbnail"):
+    for key in ("image", "image_url", "video", "video_url", "thumbnail", "video_thumbnail"):
         u = item.get(key)
-        if u:
+        if isinstance(u, str) and u:
             urls.append(u)
+    for entry in item.get("album_preview", []) or []:
+        if isinstance(entry, dict):
+            u = entry.get("image_file_uri") or entry.get("url")
+            if u:
+                urls.append(u)
+        elif isinstance(entry, str):
+            urls.append(entry)
     for img in item.get("images", []) or []:
         if isinstance(img, str):
             urls.append(img)
@@ -138,7 +172,7 @@ def _collect_facebook_search_media_urls(item: Dict[str, Any]) -> List[str]:
             u = img.get("url") or img.get("src")
             if u:
                 urls.append(u)
-    for vid in item.get("videos", []) or []:
+    for vid in item.get("video_files", []) or item.get("videos", []) or []:
         if isinstance(vid, str):
             urls.append(vid)
         elif isinstance(vid, dict):

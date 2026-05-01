@@ -219,6 +219,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 - **InstagramHashtagActor**: `keyword_search`, `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 - **InstagramProfilePostsActor**: `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `video_dir` (default `cache/media/instagram`), `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 - **FacebookPagePostsActor**: `fetch_attached_url`, `download_images`, `download_video`, `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
+- **FacebookKeywordSearchActor**: `fetch_attached_url`, `recent_posts`, `location_uid`, `enrich_followers`, `stats_max_age_days` (default 90), `enrich_author_after_likes` (int, optional — only scrape profiles for posts whose `likes` exceed this threshold; cached stats still apply to all), `get_comments_after_likes` (int, optional — only scrape comments for posts whose `likes` exceed this threshold). Pipeline override: `_filter_llm` runs right after `_filter_language` so LLM-rejected posts skip author/location enrichment and comment scraping.
 
 ## Processing pipeline (`ApifyActor.process_documents`)
 
