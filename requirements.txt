@@ -1,7 +1,6 @@
 apify_client
 newsplease
 newspaper4k
-openai
 pika
 python-dateutil
 python-dotenv

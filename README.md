@@ -377,7 +377,7 @@ Single-pass HTML cleaner that reduces token count before LLM parsing:
 
 # Supporting modules
 
-- **`src/oai/`** — LLM client, call wrappers, and caching (`llm_core.py`, `llm_call.py`). LLM annotation outputs (relevance filtering, stance extraction) are cached; data layout files (`filtered_posts.json`, `analyzed_posts.json`, etc.) reflect cached annotation outputs.
+- **`src/oai/`** — LLM client and caching. `openrouter.py` is a thin client over OpenRouter's chat completions endpoint (`OpenRouterClient`, `call_openrouter()`); reads `OPENROUTER_API_KEY` (required) and `OPENROUTER_MODEL` (optional, default `google/gemini-2.5-flash-lite`). `llm_core.py` wraps it with file+memory caching (`llm_cached_call()`, `parse_json_response()`, `get_text_content()`); the cache dir defaults to `cache/llm_core` and can be overridden via `LLM_CACHE_PATH`.
 - **`src/helpers/mongoconnection.py`** — MongoDB connection setup. Reads credentials from env vars, provides `mongoconn` singleton client. Used by `SourcesManagement` to load source data.
 - **`src/helpers/rabbitmq.py`** — `RMQ` class wrapping `pika.BlockingConnection`. Auto-reconnect, module-level `publish()` and `close_client()` singleton. Config via env vars.
 - **`src/helpers/text_fn.py`** — Text normalization utilities.

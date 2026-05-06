@@ -76,7 +76,9 @@ Raw Apify actor output
 ```
 
 ## Dependencies (`requirements.txt`)
-`apify_client`, `newsplease`, `newspaper4k`, `openai`, `pika`, `python-dateutil`, `python-dotenv`, `pytz`, `requests`, `tldextract`, `pymongo`, `langdetect`.
+`apify_client`, `newsplease`, `newspaper4k`, `pika`, `python-dateutil`, `python-dotenv`, `pytz`, `requests`, `tldextract`, `pymongo`, `langdetect`.
+
+LLM calls go through OpenRouter (`src/oai/openrouter.py` + `src/oai/llm_core.py`); no `openai` SDK is required. Configure via env vars `OPENROUTER_API_KEY` (required) and `OPENROUTER_MODEL` (optional, defaults to `google/gemini-2.5-flash-lite`). The cache directory is `cache/llm_core` by default and can be overridden with `LLM_CACHE_PATH`.
 
 ## Development Rules
 
