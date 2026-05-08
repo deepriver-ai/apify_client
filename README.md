@@ -362,7 +362,7 @@ Current actors:
 Used by `News.fetch_and_parse()` to download and extract full article content.
 
 - **`load_url.py`** — `fetch_html(url)`: streaming HTTP download, 10 MB size guard, 15s timeout, 3 retries, browser UA headers. Returns a tuple `(html, final_url)` where `final_url` is the URL after following redirects (`r.url` from requests). Returns `(None, None)` on failure.
-- **`parser.py`** — `extract_article(html, url)`: three-tier extraction (NewsPlease → newspaper4k → LLM). Returns `{title, body, author, media_urls, timestamp}` or `None`. `timestamp` comes from NewsPlease's `date_publish`, newspaper's `publish_date`, or the LLM's `published_at` (ISO 8601). Requires body >= 200 chars.
+- **`parser.py`** — `extract_article(html, url)`: three-tier extraction (NewsPlease → newspaper4k → LLM). Returns `{title, body, author, media_urls, timestamp}` or `None`. `timestamp` comes from NewsPlease's `date_publish`, newspaper's `publish_date`, or the LLM's `published_at` (ISO 8601). Requires body >= 200 chars. Bodies that look like a related-posts carousel (3+ occurrences of "Ver más"/"Leer más"/"Read more"/"See more"/"Continue reading"/"Saber más"/"Más información", case-insensitive) are rejected so the LLM tier kicks in — handles WordPress page-builder sites (e.g. Breakdance/Elementor) where NewsPlease/newspaper4k latch onto the `<article class="bde-loop-item …">` related-posts blocks instead of the real article body.
 
 ### HTML cleaner (`src/helpers/html_cleaner.py`)
 

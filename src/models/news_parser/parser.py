@@ -7,6 +7,19 @@ logger = logging.getLogger(__name__)
 
 MIN_BODY_LENGTH = 200
 
+# "See more" link texts that repeat when a parser mistakes a related-posts
+# carousel for the article body. Three or more hits = list, not article.
+_RELATED_LINK_MARKERS = (
+    "ver más",
+    "leer más",
+    "read more",
+    "see more",
+    "continue reading",
+    "saber más",
+    "más información",
+)
+_RELATED_LINK_THRESHOLD = 3
+
 
 def extract_article(html: str, url: str) -> Optional[Dict[str, Any]]:
     """
@@ -173,9 +186,22 @@ def _has_meaningful_content(result: Dict[str, Any]) -> bool:
     """Check if the parsed result has a title and enough body text."""
     if not result:
         return False
-    has_title = bool(result.get("title", "").strip())
-    has_body = len(result.get("body", "")) >= MIN_BODY_LENGTH
-    return has_title and has_body
+    title = result.get("title", "").strip()
+    body = result.get("body", "") or ""
+    if not title or len(body) < MIN_BODY_LENGTH:
+        return False
+    if _looks_like_related_posts_list(body):
+        return False
+    return True
+
+
+def _looks_like_related_posts_list(body: str) -> bool:
+    # When NewsPlease/newspaper4k latch onto a related-posts carousel (e.g.
+    # Breakdance/Elementor `bde-loop-item` blocks on expresoqueretaro.com)
+    # the extracted text is a list of headlines each followed by "Ver más".
+    lowered = body.lower()
+    hits = sum(lowered.count(marker) for marker in _RELATED_LINK_MARKERS)
+    return hits >= _RELATED_LINK_THRESHOLD
 
 
 def _field_ok(result: Dict[str, Any], field: str) -> bool:
