@@ -16,6 +16,13 @@ section→question grouping and question→json-field mapping are owned by this
 module (not by the xlsx category column) so the xlsx remains a human-facing
 reference and code stays stable when the xlsx is reorganised.
 """
+
+"""
+TODO
+Merge some sections to do less calls. The end goal of sections is to not overwhelm the model and try to get more consistent, truthful answers.
+Add proposed elements from the extensible catalogues to the catalogue.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -31,7 +38,7 @@ from pydantic import BaseModel, Field
 
 from google.genai import types as genai_types
 
-from schema_tools import normalize_record
+from src.schema import normalize_record
 
 log = logging.getLogger(__name__)
 

@@ -218,6 +218,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 - **GoogleNewsActor**: `timeframe`, `region_language`, `decode_urls`, `extract_descriptions`, `extract_images`, `enrich`
 - **InstagramHashtagActor**: `keyword_search`, `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 - **InstagramProfilePostsActor**: `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `video_dir` (default `cache/media/instagram`), `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
+- **InstagramProfileQueenlikeActor**: `scrape_type` (default `"posts"` — also accepts `"reels"`), `output_mode` (default `"clean"`), plus all `InstagramProfilePostsActor` enrichment params (`fetch_attached_url`, `download_video`, `video_dir`, `enrich_followers`, `stats_max_age_days`, `get_comments`, `max_comments`, etc.). `search_params` are usernames (not URLs); the underlying actor accepts a single username per run, so `search()` loops over inputs internally. Surfaces `reshare_count` as `shares` (the default Instagram actors don't return shares) and embeds `author.follower_count` as `website_visits` so follower stats are available without an extra profile scrape
 - **FacebookPagePostsActor**: `fetch_attached_url`, `download_images`, `download_video`, `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 - **FacebookKeywordSearchActor**: `fetch_attached_url`, `recent_posts`, `location_uid`, `enrich_followers`, `stats_max_age_days` (default 90), `enrich_author_after_likes` (int, optional — only scrape profiles for posts whose `likes` exceed this threshold; cached stats still apply to all), `get_comments_after_likes` (int, optional — only scrape comments for posts whose `likes` exceed this threshold). Pipeline override: `_filter_llm` runs right after `_filter_language` so LLM-rejected posts skip author/location enrichment and comment scraping.
 
@@ -275,6 +276,7 @@ Maps string keys to actor classes:
 | `google_news` | `GoogleNewsActor` |
 | `instagram_hashtags` | `InstagramHashtagActor` |
 | `instagram_profile_posts` | `InstagramProfilePostsActor` |
+| `instagram_profile_queenlike` | `InstagramProfileQueenlikeActor` |
 | `facebook_page_posts` | `FacebookPagePostsActor` |
 
 
@@ -352,6 +354,7 @@ Current actors:
 - **`news/news_scraper.py`** — `GoogleNewsActor` (actor `3Z6SK7F2WoPU3t2sg`)
 - **`instagram/hashtags.py`** — `InstagramHashtagActor` (actor `reGe1ST3OBgYZSsZJ`)
 - **`instagram/profile_posts.py`** — `InstagramProfilePostsActor` (actor `shu8hvrXbJbY3Eb9W`). Scrapes posts from profile URLs, downloads videos via `igview-owner/instagram-video-downloader` with URL-hash caching to `cache/media/instagram/`
+- **`instagram/profile_queenlike.py`** — `InstagramProfileQueenlikeActor` (actor `queenlike_xystos/instagram-posts-reels-scraper---no-cookies`). Subclasses `InstagramProfilePostsActor`; takes usernames (not URLs) and loops one Apify run per username. Surfaces `reshare_count` → `shares` and `author.follower_count` → `website_visits`
 - **`facebook/posts.py`** — `FacebookPagePostsActor` (actor `apify/facebook-posts-scraper`)
 - **`facebook/profiles.py`** — `FacebookProfileActor`, utility class wrapping `apify/facebook-pages-scraper`. Used internally by `FacebookPagePostsActor` for author enrichment. Not in the actor registry
 - **`facebook/comments.py`** — `FacebookCommentsActor`, utility class wrapping `apify/facebook-comments-scraper`. Used internally by `FacebookPagePostsActor` for comment enrichment. Not in the actor registry

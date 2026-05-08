@@ -6,6 +6,7 @@ Usage (from project root):
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.actors.instagram.profile_posts import InstagramProfilePostsActor
+from src.actors.instagram.profile_queenlike import InstagramProfileQueenlikeActor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -22,13 +24,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 # Task parameters — edit these before running
 # ------------------------------------------------------------------
 
-# Profile URLs to scrape posts from
-search_params = [
+# Which Instagram actor to run.
+#   "default"   → InstagramProfilePostsActor   (apify shu8hvrXbJbY3Eb9W; search_params = profile/post URLs)
+#   "queenlike" → InstagramProfileQueenlikeActor (queenlike_xystos/...; search_params = usernames; returns reshare_count → shares)
+actor_choice = "queenlike"
+
+# Profile URLs to scrape posts from (used when actor_choice == "default")
+search_params_urls = [
     "https://www.instagram.com/luluthepiggy_official/",
     "https://www.instagram.com/shuya_official/"
 ]
 
-search_params = [
+search_params_urls = [
 'https://www.instagram.com/p/DWVIVAIjFQf/',
 'https://www.instagram.com/p/DWEBN3_EaxR/',
 'https://www.instagram.com/reel/DVqHLokkT33/',
@@ -40,6 +47,13 @@ search_params = [
 'https://www.instagram.com/reel/DXUMwjJkfG9/',
 'https://www.instagram.com/reel/DUVn6KdjE4-/'
 ]
+
+# Usernames to scrape (used when actor_choice == "queenlike")
+search_params_usernames = [
+    "nina.deloto",
+]
+
+search_params = search_params_usernames if actor_choice == "queenlike" else search_params_urls
 
 # Filtering
 task_id = "ig_post_tst"          # unique task identifier (used for filter cache)
@@ -66,11 +80,15 @@ enrich_followers = False           # scrape profile data (followers, bio, full n
 stats_max_age_days = 90            # skip profiles with stats fresher than this
 
 # Comments
-get_comments = True                # scrape comments for each post
+get_comments = False                # scrape comments for each post
 max_comments = 5                   # max comments per post
 
-# Apify actor params
+# Apify actor params (default actor only)
 results_type = "posts"             # "posts", "reels", "tagged"
+
+# Apify actor params (queenlike actor only)
+scrape_type = "posts"              # "posts", "reels"
+output_mode = "clean"
 
 # Whether to publish to RabbitMQ (False saves to cache/runs/ instead)
 publish = False
@@ -79,7 +97,10 @@ publish = False
 # Run
 # ------------------------------------------------------------------
 
-actor = InstagramProfilePostsActor()
+if actor_choice == "queenlike":
+    actor = InstagramProfileQueenlikeActor()
+else:
+    actor = InstagramProfilePostsActor()
 
 kwargs = {
     "task_id": task_id,
@@ -103,6 +124,8 @@ kwargs = {
     "get_comments": get_comments,
     "max_comments": max_comments,
     "results_type": results_type,
+    "scrape_type": scrape_type,
+    "output_mode": output_mode,
 }
 
 documents = actor.search(search_params, **kwargs)
@@ -135,6 +158,7 @@ else:
         json.dump(results, f, ensure_ascii=False, indent=2, default=str)
     print(f"Saved {len(documents)} documents to {filepath}")
 
+documents_bak = copy.deepcopy(documents)
 # ------------------------------------------------------------------
 # Post-processing: describe videos with Gemini, section by section
 # ------------------------------------------------------------------
@@ -142,6 +166,12 @@ else:
 # When running interactively against a previously saved set of docs, swap the
 # block above for a json.load() of cache/runs/*.json. By default we operate on
 # the in-memory `documents` produced by `actor.search()` above.
+
+# read scraped posts
+filepath = '/Users/oscarcuellar/ocn/media/apify_client/cache/runs/instagram_profile_posts_id_ig_post_tst_20260427_215140.json'
+with open(filepath, "r", encoding="utf-8") as f:
+    new_documents = json.load(f)
+
 
 import sys                                                                           
 sys.path.insert(0, '/Users/oscarcuellar/ocn/media/schema_tools/src')
