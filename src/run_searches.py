@@ -33,7 +33,7 @@ if __name__ == "__main__":
         tasks = [t for t in tasks if t.theme == CURRENT_THEME]
         logger.info("Filtered to %d tasks with theme=%s", len(tasks), CURRENT_THEME)
 
-    for task in tasks:
+    for task in reversed(tasks):
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
             actor = get_actor(task.actor_class)
