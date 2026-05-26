@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from apify_client import ApifyClient
 from dotenv import load_dotenv
@@ -43,13 +43,14 @@ class ApifyActor:
 
         1. ``_filter_keywords``    — cheapest, substring match
         2. ``_filter_date``        — cheap, timestamp available from API
-        3. ``_enrich_content``     — expensive (HTTP fetch + parse for news)
-        4. ``_filter_language``    — cheap, needs body text from step 3
-        5. ``_enrich_user_author`` — user profile enrichment (bio, followers)
-        6. ``_enrich_location``    — potentially expensive (geocoding for social)
-        7. ``_filter_location``    — cheap, geoid prefix match
-        8. ``_filter_llm``         — LLM-based filtering (batched, expensive)
-        9. ``_enrich_comments``    — comments enrichment
+        3. ``_filter_existing_in_elasticsearch`` — cheap, URL ids in news
+        4. ``_enrich_content``     — expensive (HTTP fetch + parse for news)
+        5. ``_filter_language``    — cheap, needs body text from step 4
+        6. ``_enrich_user_author`` — user profile enrichment (bio, followers)
+        7. ``_enrich_location``    — potentially expensive (geocoding for social)
+        8. ``_filter_location``    — cheap, geoid prefix match
+        9. ``_filter_llm``         — LLM-based filtering (batched, expensive)
+        10. ``_enrich_comments``   — comments enrichment
 
     Subclasses override individual stages to push filters to the API level
     or to provide actor-specific enrichment.
@@ -103,6 +104,7 @@ class ApifyActor:
 
         documents = self._filter_keywords(documents, **kwargs)
         documents = self._filter_date(documents, **kwargs)
+        documents = self._filter_existing_in_elasticsearch(documents, **kwargs)
         documents = self._enrich_content(documents, **kwargs)
         documents = self._filter_language(documents, **kwargs)
         documents = self._enrich_user_author(documents, **kwargs)
@@ -150,6 +152,49 @@ class ApifyActor:
         documents = [doc for doc in documents if doc.matches_min_date(min_date)]
         logger.info("Date filter (min_date=%s): %d → %d documents", min_date.date(), before, len(documents))
         return documents
+
+    def _filter_existing_in_elasticsearch(self, documents: List, **kwargs) -> List:
+        """Drop documents whose URL already exists as an id in the news index."""
+        if (
+            kwargs.get("check_existing_elasticsearch", True) is False
+            or kwargs.get("skip_existing_filter", False)
+            or not documents
+        ):
+            return documents
+
+        urls = [doc.data.get("url") for doc in documents if doc.data.get("url")]
+        if not urls:
+            return documents
+
+        existing_ids = self._existing_news_ids(urls)
+        if not existing_ids:
+            return documents
+
+        before = len(documents)
+        documents = [
+            doc for doc in documents
+            if not doc.data.get("url") or doc.data.get("url") not in existing_ids
+        ]
+        logger.info("Elasticsearch existing-doc filter: %d → %d documents", before, len(documents))
+        return documents
+
+    def _existing_news_ids(self, urls: List[str]) -> Set[str]:
+        """Return URL ids that already exist in the Elasticsearch ``news`` index."""
+        unique_urls = list(dict.fromkeys(urls))
+        if not unique_urls:
+            return set()
+
+        try:
+            from elastic_client import SearchClient
+
+            search = SearchClient().raw_search("news")
+            search = search.filter({"ids": {"values": unique_urls}}).source(False)[:len(unique_urls)]
+            response = search.execute()
+        except Exception as exc:
+            logger.warning("Could not check existing documents in Elasticsearch: %s", exc)
+            return set()
+
+        return {hit.meta.id for hit in response.hits if getattr(hit.meta, "id", None)}
 
     def _enrich_content(self, documents: List, **kwargs) -> List:
         """Enrich document content. No-op by default; subclasses override."""

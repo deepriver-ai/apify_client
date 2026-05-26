@@ -230,13 +230,14 @@ After creating Documents from raw API results, actors call `process_documents()`
 Documents (created from raw results, no enrichment)
   → 1. _filter_keywords      — cheapest, case-insensitive substring match on body+title against not_keywords
   → 2. _filter_date          — cheap, timestamp available from API (supports min_date or period)
-  → 3. _enrich_content       — expensive (fetch_and_parse for news; social: fetch_attached_url via Post.fetch_attached_url() — fetches linked article, appends text, stores News on post.attached_news; download media stubs, OCR/transcription stubs)
-  → 4. _filter_language      — cheap, needs body text from step 3
-  → 5. _enrich_location      — news: SourcesManagement domain lookup; social: geocoding via Post.enrich_location() with UsersManagement caching (checks cached user location first, saves new geocoded locations back)
-  → 6. _filter_location      — cheap, checks location_ids first (any geoid prefix match), falls back to author_location_id; keeps docs with no location data
-  → 7. _filter_llm           — LLM-based: sends batched text snippets (with user_name, user_location, user_bio metadata) to LLM with llm_filter_condition, keeps only returned indices. Skipped if condition not set
-  → 8. _enrich_user_author   — Instagram: bulk scrapes profiles via apify/instagram-profile-scraper, maps followersCount → website_visits, fullName → author_full_name, biography → author_profile_bio, caches in UsersManagement (skips fresh profiles); Facebook: bulk scrapes page profiles via FacebookProfileActor (apify/facebook-pages-scraper), maps likes → website_visits, title → author_full_name, info → author_profile_bio, address → author_location_text
-  → 9. _enrich_comments      — if get_comments: scrape comments via dedicated actor per platform
+  → 3. _filter_existing_in_elasticsearch — batch checks document URLs as ids in the news index; existing docs skip later enrichment
+  → 4. _enrich_content       — expensive (fetch_and_parse for news; social: fetch_attached_url via Post.fetch_attached_url() — fetches linked article, appends text, stores News on post.attached_news; download media stubs, OCR/transcription stubs)
+  → 5. _filter_language      — cheap, needs body text from step 4
+  → 6. _enrich_location      — news: SourcesManagement domain lookup; social: geocoding via Post.enrich_location() with UsersManagement caching (checks cached user location first, saves new geocoded locations back)
+  → 7. _filter_location      — cheap, checks location_ids first (any geoid prefix match), falls back to author_location_id; keeps docs with no location data
+  → 8. _filter_llm           — LLM-based: sends batched text snippets (with user_name, user_location, user_bio metadata) to LLM with llm_filter_condition, keeps only returned indices. Skipped if condition not set
+  → 9. _enrich_user_author   — Instagram: bulk scrapes profiles via apify/instagram-profile-scraper, maps followersCount → website_visits, fullName → author_full_name, biography → author_profile_bio, caches in UsersManagement (skips fresh profiles); Facebook: bulk scrapes page profiles via FacebookProfileActor (apify/facebook-pages-scraper), maps likes → website_visits, title → author_full_name, info → author_profile_bio, address → author_location_text
+  → 10. _enrich_comments     — if get_comments: scrape comments via dedicated actor per platform
   → to_final_schema → publish to RabbitMQ
 ```
 
@@ -248,7 +249,9 @@ Social actors (Instagram, Facebook) override `_enrich_content` to dispatch enric
 
 TODO: Replace file-based filter cache with Redis for multi-process/distributed support.
 
-**Cost savings:** date filtering runs before content enrichment, so articles that fail the date check skip the expensive HTTP fetch + parse. Language filtering runs before location enrichment, so documents in the wrong language skip geocoding.
+**Elasticsearch existing-doc filter**: `_filter_existing_in_elasticsearch` imports the sibling `elastic_client` package from `PYTHONPATH` and checks document URLs against `_id` in the `news` index. Use `source setup_local.sh` before local runs to add this repo and `/Users/oscarcuellar/ocn/media/elastic_client` to `PYTHONPATH`. Set `check_existing_elasticsearch=false` to disable the check for a run. If the local package or ES connection is unavailable, the stage logs a warning and keeps all documents.
+
+**Cost savings:** date filtering and the Elasticsearch existing-document check run before content enrichment, so old or already-ingested documents skip the expensive HTTP fetch + parse and social enrichment steps. Language filtering runs before location enrichment, so documents in the wrong language skip geocoding.
 
 Language codes are normalized to ISO 639-1 via `normalize_language()` — accepts `"es"`, `"spanish"`, `"MX:es-419"`, `"es-MX"`, etc. Location filtering uses geoid prefix matching: `geoid="_48416053"` matches `country_id="_484"` (Mexico). `_filter_location` checks `location_ids` first (if non-empty, any match passes); when `location_ids` is empty it falls back to `author_location_id`. Non-geoid location IDs (e.g. Instagram numeric IDs) pass through. Documents with no location data are kept.
 
@@ -302,6 +305,8 @@ GoogleNewsActor.search(search_params, **kwargs)
          │
          ├─ _filter_date          — drop articles older than min_date (cheap, uses timestamp)
          │
+         ├─ _filter_existing_in_elasticsearch — drop articles whose URL already exists as an id in news
+         │
          ├─ _enrich_content       — news.fetch_and_parse() for each surviving article
          │      │
          │      ├─ fetch_html(url)          streaming download, 10MB guard, 3 retries
@@ -348,7 +353,7 @@ Each Apify actor lives in its own class. Actor classes inherit from `ApifyActor`
 |---|---|---|
 | `search(search_params, **kwargs)` | list of search terms | `List[Document]` (e.g. `List[News]`) |
 
-The base class provides `process_documents(docs, **kwargs)` — a staged pipeline (keyword filter → date filter → content enrichment → language filter → location enrichment → location filter → LLM filter → follower enrichment → comment enrichment). Subclasses call it after creating Documents and override individual stages. The pipeline supports a per-document per-task filter cache (`cache/filter_cache.json`) and an `override_filters` flag to force re-evaluation.
+The base class provides `process_documents(docs, **kwargs)` — a staged pipeline (keyword filter → date filter → existing-doc ES filter → content enrichment → language filter → location enrichment → location filter → LLM filter → follower enrichment → comment enrichment). Subclasses call it after creating Documents and override individual stages. The pipeline supports a per-document per-task filter cache (`cache/filter_cache.json`) and an `override_filters` flag to force re-evaluation.
 
 Current actors:
 - **`news/news_scraper.py`** — `GoogleNewsActor` (actor `3Z6SK7F2WoPU3t2sg`)

@@ -42,6 +42,7 @@ class LinkedInKeywordSearchActor(ApifyActor):
 
         documents = self._filter_keywords(documents, **kwargs)
         documents = self._filter_date(documents, **kwargs)
+        documents = self._filter_existing_in_elasticsearch(documents, **kwargs)
         documents = self._enrich_content(documents, **kwargs)
         documents = self._filter_language(documents, **kwargs)
         documents = self._enrich_location(documents, **kwargs)
