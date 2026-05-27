@@ -156,7 +156,8 @@ class ApifyActor:
     def _filter_existing_in_elasticsearch(self, documents: List, **kwargs) -> List:
         """Drop documents whose URL already exists as an id in the news index."""
         if (
-            kwargs.get("check_existing_elasticsearch", True) is False
+            kwargs.get("update_existing", False)
+            or kwargs.get("check_existing_elasticsearch", True) is False
             or kwargs.get("skip_existing_filter", False)
             or not documents
         ):

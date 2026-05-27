@@ -113,6 +113,25 @@ class FacebookKeywordSearchActor(ApifyActor):
                 doc.fetch_attached_url(url=external_url)
         return documents
 
+    def _filter_llm(self, documents: List, **kwargs) -> List:
+        filtered = super()._filter_llm(documents, **kwargs)
+        if not kwargs.get("llm_filter_condition") or not documents:
+            return filtered
+
+        kept_ids = {id(doc) for doc in filtered}
+        removed = [doc for doc in documents if id(doc) not in kept_ids]
+        if not removed:
+            return filtered
+
+        snippet_max_len = kwargs.get("snippet_max_len", 250)
+        for doc in removed:
+            logger.info(
+                "Facebook keyword LLM filtered url=%s snippet_max_len=%s",
+                doc.data.get("url") or "<missing>",
+                snippet_max_len,
+            )
+        return filtered
+
     def _enrich_user_author(self, documents: List, **kwargs) -> List:
         """Apply cached stats; when ``enrich_followers`` is set, bulk-scrape
         stale page profiles via ``FacebookProfileActor`` and persist results to

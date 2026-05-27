@@ -179,13 +179,14 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 | `not_keywords` | `List[str]` | `[]` | Keywords to exclude — documents containing any are filtered out. Pipe-separated in CSV |
 | `llm_filter_condition` | `str \| None` | `None` | Spanish-language LLM filtering condition. If set, documents are filtered via batched LLM calls |
 | `override_filters` | `bool` | `False` | If true, ignores the filter cache and re-runs all filters from scratch. Useful for reprocessing after changing filter conditions |
+| `update_existing` | `bool` | `False` | If true, keeps documents that already exist in Elasticsearch so they can be enriched/published again as updates |
 | `theme` | `str \| None` | `None` | Theme tag grouping tasks (e.g. `orizaba`). `run_searches.py` filters tasks to a single `CURRENT_THEME` constant at runtime |
 | `actor_params` | `Dict[str, Any]` | `{}` | Actor-specific overrides (parsed from JSON in CSV) |
 
 **Key methods:**
 
 - `CrawlTask.from_csv_row(row)` — class method that parses a row dict into a `CrawlTask`. Handles type conversions (bools, dates, JSON), validates `period` values (`d`/`w`/`m`), and raises `ValueError` if both `min_date` and `period` are set.
-- `CrawlTask.to_actor_kwargs()` — merges common parameters (`task_id`, `max_results`, `country_id`, `language`, `min_date`, `period`, `get_comments`, `max_comments`, `not_keywords`, `llm_filter_condition`, `override_filters`) with `actor_params` into a single kwargs dict passed to the actor's method.
+- `CrawlTask.to_actor_kwargs()` — merges common parameters (`task_id`, `max_results`, `country_id`, `language`, `min_date`, `period`, `get_comments`, `max_comments`, `not_keywords`, `llm_filter_condition`, `override_filters`, `update_existing`) with `actor_params` into a single kwargs dict passed to the actor's method.
 - `load_tasks(xlsx_path)` — reads the Excel (.xlsx) file, creates `CrawlTask` objects, and returns only enabled tasks.
 
 **Data flow:** `tasks.xlsx` → `load_tasks()` → list of `CrawlTask` → for each task: `get_actor(task.actor_class)` → `actor.search(task.search_params, **task.to_actor_kwargs())` → documents → optionally publish to RabbitMQ.
@@ -209,6 +210,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 | `not_keywords` | str | no | Pipe-separated keywords to exclude (e.g. `spam\|ads`). Documents containing any keyword (case-insensitive, substring match on body+title) are filtered out as the first pipeline step |
 | `llm_filter_condition` | str | no | Spanish-language filtering condition for LLM-based filtering. The LLM receives text snippets and applies this condition to decide which to keep. Example: `"elimina publicaciones que no estén relacionadas con lubricantes"` |
 | `override_filters` | bool | no | Default false. If true, ignores filter cache and re-runs all filters from scratch |
+| `update_existing` | bool | no | Default false. If true, disables the Elasticsearch existing-doc filter so already-ingested URLs continue through enrichment/publish |
 | `theme` | str | no | Theme tag (e.g. `orizaba`). Only tasks matching `CURRENT_THEME` in `src/run_searches.py` are executed |
 | `actor_params` | JSON str | no | Actor-specific overrides as JSON |
 
@@ -249,7 +251,7 @@ Social actors (Instagram, Facebook) override `_enrich_content` to dispatch enric
 
 TODO: Replace file-based filter cache with Redis for multi-process/distributed support.
 
-**Elasticsearch existing-doc filter**: `_filter_existing_in_elasticsearch` imports the sibling `elastic_client` package from `PYTHONPATH` and checks document URLs against `_id` in the `news` index. Use `source setup_local.sh` before local runs to add this repo and `/Users/oscarcuellar/ocn/media/elastic_client` to `PYTHONPATH`. Set `check_existing_elasticsearch=false` to disable the check for a run. If the local package or ES connection is unavailable, the stage logs a warning and keeps all documents.
+**Elasticsearch existing-doc filter**: `_filter_existing_in_elasticsearch` imports the sibling `elastic_client` package from `PYTHONPATH` and checks document URLs against `_id` in the `news` index. Use `source setup_local.sh` before local runs to add this repo and `/Users/oscarcuellar/ocn/media/elastic_client` to `PYTHONPATH`. Set `update_existing=true` when you want already-ingested URLs to continue through enrichment/publish as updates. Set `check_existing_elasticsearch=false` to disable the check for a run. If the local package or ES connection is unavailable, the stage logs a warning and keeps all documents.
 
 **Cost savings:** date filtering and the Elasticsearch existing-document check run before content enrichment, so old or already-ingested documents skip the expensive HTTP fetch + parse and social enrichment steps. Language filtering runs before location enrichment, so documents in the wrong language skip geocoding.
 
@@ -257,11 +259,11 @@ Language codes are normalized to ISO 639-1 via `normalize_language()` — accept
 
 ## Example rows
 
-| task_id | actor_class | search_params | country_id | language | min_date | period | max_results | enabled | publish | get_comments | max_comments | not_keywords | llm_filter_condition | override_filters | actor_params |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | google_news | totalenergies | _484 | es | | d | 30 | true | true | false | | | | | {"timeframe":"1d","enrich":true} |
-| 2 | instagram_hashtags | totalenergies | _484 | es | | d | 50 | true | true | false | 15 | | elimina publicaciones no relacionadas con lubricantes | | {"keyword_search":false,"enrich_followers":true} |
-| 3 | facebook_page_posts | https://facebook.com/SomePage | _484 | es | | w | 20 | true | true | false | | spam\|ads | | | {"fetch_attached_url":true,"add_text_from_images":true} |
+| task_id | actor_class | search_params | country_id | language | min_date | period | max_results | enabled | publish | get_comments | max_comments | not_keywords | llm_filter_condition | override_filters | update_existing | actor_params |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | google_news | totalenergies | _484 | es | | d | 30 | true | true | false | | | | | false | {"timeframe":"1d","enrich":true} |
+| 2 | instagram_hashtags | totalenergies | _484 | es | | d | 50 | true | true | false | 15 | | elimina publicaciones no relacionadas con lubricantes | | false | {"keyword_search":false,"enrich_followers":true} |
+| 3 | facebook_page_posts | https://facebook.com/SomePage | _484 | es | | w | 20 | true | true | false | | spam\|ads | | | false | {"fetch_attached_url":true,"add_text_from_images":true} |
 
 ## Running
 
@@ -405,7 +407,7 @@ python -m pytest src/tests/ -v
 
 | Module | Coverage |
 |---|---|
-| `test_crawl_task.py` | CrawlTask parsing: task_id, period, get_comments, max_comments, not_keywords, llm_filter_condition, override_filters, mutual exclusivity, to_actor_kwargs |
+| `test_crawl_task.py` | CrawlTask parsing: task_id, period, get_comments, max_comments, not_keywords, llm_filter_condition, override_filters, update_existing, mutual exclusivity, to_actor_kwargs |
 | `test_document.py` | Document._empty_data fields, matches_min_date |
 | `test_google_news_actor.py` | GoogleNewsActor: document creation, Apify params, date/language/period filters, final schema, get_comments no-op |
 | `test_instagram_actor.py` | InstagramHashtagActor: document creation, Apify params, date/period filters, comment enrichment, final schema with/without comments |

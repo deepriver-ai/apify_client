@@ -32,6 +32,7 @@ class CrawlTask:
     not_keywords: List[str] = field(default_factory=list)
     llm_filter_condition: str | None = None
     override_filters: bool = False
+    update_existing: bool = False
     enrich_followers: bool = False
     fetch_attached_url: bool = False
     theme: str | None = None
@@ -98,6 +99,7 @@ class CrawlTask:
             not_keywords=not_keywords,
             llm_filter_condition=llm_filter_condition,
             override_filters=parse_bool(row.get("override_filters", ""), default=False),
+            update_existing=parse_bool(row.get("update_existing", ""), default=False),
             enrich_followers=parse_bool(row.get("enrich_followers", ""), default=False),
             fetch_attached_url=parse_bool(row.get("fetch_attached_url", ""), default=False),
             theme=row.get("theme", "").strip().lower() or None,
@@ -118,6 +120,7 @@ class CrawlTask:
             "not_keywords": self.not_keywords,
             "llm_filter_condition": self.llm_filter_condition,
             "override_filters": self.override_filters,
+            "update_existing": self.update_existing,
             "enrich_followers": self.enrich_followers,
             "fetch_attached_url": self.fetch_attached_url,
         }

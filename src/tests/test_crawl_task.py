@@ -23,6 +23,7 @@ def _make_row(**overrides) -> dict:
         "not_keywords": "",
         "llm_filter_condition": "",
         "override_filters": "",
+        "update_existing": "",
         "enrich_followers": "",
         "fetch_attached_url": "",
         "actor_params": "",
@@ -93,6 +94,11 @@ class TestToActorKwargs:
         kwargs = task.to_actor_kwargs()
         assert kwargs["not_keywords"] == ["spam", "ads"]
 
+    def test_includes_update_existing(self):
+        task = CrawlTask.from_csv_row(_make_row(update_existing="true"))
+        kwargs = task.to_actor_kwargs()
+        assert kwargs["update_existing"] is True
+
 
 class TestNotKeywordsParsing:
     def test_pipe_separated(self):
@@ -152,6 +158,21 @@ class TestOverrideFiltersParsing:
         task = CrawlTask.from_csv_row(_make_row(override_filters="true"))
         kwargs = task.to_actor_kwargs()
         assert kwargs["override_filters"] is True
+
+
+class TestUpdateExistingParsing:
+    def test_true(self):
+        task = CrawlTask.from_csv_row(_make_row(update_existing="true"))
+        assert task.update_existing is True
+
+    def test_defaults_false(self):
+        task = CrawlTask.from_csv_row(_make_row())
+        assert task.update_existing is False
+
+    def test_included_in_kwargs(self):
+        task = CrawlTask.from_csv_row(_make_row(update_existing="true"))
+        kwargs = task.to_actor_kwargs()
+        assert kwargs["update_existing"] is True
 
 
 class TestFetchAttachedUrlParsing:

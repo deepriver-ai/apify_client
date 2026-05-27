@@ -12,11 +12,13 @@ class RecordingActor(ApifyActor):
         self.search_params_keywords = []
         self._filter_cache = {}
         self.enriched_urls = []
+        self.existing_lookup_count = 0
 
     def _save_filter_cache(self) -> None:
         pass
 
     def _existing_news_ids(self, urls):
+        self.existing_lookup_count += 1
         return {"https://example.com/existing"}
 
     def _enrich_content(self, documents, **kwargs):
@@ -61,3 +63,23 @@ def test_existing_elasticsearch_filter_can_be_disabled():
         "https://example.com/existing",
         "https://example.com/new",
     ]
+
+
+def test_update_existing_keeps_existing_docs_and_skips_lookup():
+    actor = RecordingActor()
+    documents = [
+        _doc("https://example.com/existing"),
+        _doc("https://example.com/new"),
+    ]
+
+    result = actor.process_documents(documents, update_existing=True)
+
+    assert [doc.data["url"] for doc in result] == [
+        "https://example.com/existing",
+        "https://example.com/new",
+    ]
+    assert actor.enriched_urls == [
+        "https://example.com/existing",
+        "https://example.com/new",
+    ]
+    assert actor.existing_lookup_count == 0
