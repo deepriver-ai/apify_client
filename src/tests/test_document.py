@@ -135,3 +135,19 @@ class TestToFinalSchema:
         doc = Document(data)
         with pytest.raises(ValueError, match="url"):
             doc.to_final_schema()
+
+    def test_filters_invalid_media_url_placeholders_before_validation(self):
+        doc = Document(_valid_data(media_urls=[
+            "https://www.facebook.com/reel/1535249858392744/",
+            "video_sd_file",
+            "video_hd_file",
+            " https://example.com/image.jpg ",
+        ]))
+
+        result = doc.to_final_schema()
+
+        assert result["message"]["media_urls"] == [
+            "https://www.facebook.com/reel/1535249858392744/",
+            "https://example.com/image.jpg",
+        ]
+        assert doc.data["media_urls"] == result["message"]["media_urls"]

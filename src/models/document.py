@@ -6,6 +6,7 @@ from typing import Any, Dict
 from dateutil import parser as dateutil_parser
 from langdetect import LangDetectException, detect
 
+from src.helpers.str_fn import _is_valid_url
 from src.helpers.language import normalize_language
 from src.schema import normalize_record
 
@@ -150,9 +151,22 @@ class Document:
         ``type`` is always ``"news"``; the inner ``message.type`` carries the
         actual platform (news, x, facebook, instagram, linkedin, ...).
         """
+        self._filter_valid_media_urls()
         record = {**self.data, "location_author": self._nested_location_author()}
         parsed = normalize_record(record, "News")
         return {"type": "news", "message": parsed}
+
+    def _filter_valid_media_urls(self) -> None:
+        """Drop non-URL media placeholders before final schema validation."""
+        media_urls = self.data.get("media_urls")
+        if not media_urls:
+            self.data["media_urls"] = []
+            return
+
+        if not isinstance(media_urls, list):
+            media_urls = [media_urls]
+
+        self.data["media_urls"] = [str(url).strip() for url in media_urls if _is_valid_url(str(url).strip())]
 
     def _nested_location_author(self) -> Dict[str, Any]:
         """Build the nested location_author dict from flat location_author_* keys.
