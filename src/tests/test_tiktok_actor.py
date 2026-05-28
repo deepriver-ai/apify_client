@@ -183,6 +183,47 @@ class TestTikTokSearchInput:
 
         actor.client.actor.assert_not_called()
 
+    def test_comment_actor_respects_get_comments_after_likes(self, actor, sample_tiktok_item):
+        high_url = sample_tiktok_item["webVideoUrl"]
+        low_url = "https://www.tiktok.com/@low/video/123"
+        high_likes = TikTokPost.from_tiktok({**sample_tiktok_item, "comments": [], "diggCount": 11})
+        low_likes = TikTokPost.from_tiktok({
+            **sample_tiktok_item,
+            "comments": [],
+            "webVideoUrl": low_url,
+            "diggCount": 10,
+        })
+        comments = [
+            {
+                "videoWebUrl": high_url,
+                "text": "above threshold",
+                "createTimeISO": "2026-05-24T05:01:26.000Z",
+                "diggCount": 3,
+                "uniqueId": "high.user",
+            },
+            {
+                "videoWebUrl": low_url,
+                "text": "at threshold",
+                "createTimeISO": "2026-05-24T05:02:26.000Z",
+                "diggCount": 1,
+                "uniqueId": "low.user",
+            },
+        ]
+        actor.client.actor.return_value.call.return_value = {"defaultDatasetId": "comments-dataset"}
+        actor.client.dataset.return_value.iterate_items.return_value = iter(comments)
+
+        results = actor._enrich_comments(
+            [high_likes, low_likes],
+            get_comments=True,
+            max_comments=5,
+            get_comments_after_likes=10,
+        )
+
+        run_input = actor.client.actor.return_value.call.call_args.kwargs["run_input"]
+        assert run_input["postURLs"] == [high_url]
+        assert results[0].data["comments"][0]["comment_text"] == "above threshold"
+        assert results[1].data["comments"] == []
+
 
 class TestTikTokMapping:
     def test_raw_item_maps_to_post(self, sample_tiktok_item):

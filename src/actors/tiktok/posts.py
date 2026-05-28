@@ -96,16 +96,29 @@ class TikTokPostsActor(ApifyActor):
         return run_input
 
     def _enrich_comments(self, documents: List[TikTokPost], **kwargs) -> List[TikTokPost]:
-        """Scrape comments for filtered posts via clockworks/tiktok-comments-scraper."""
+        """Scrape comments for filtered posts via clockworks/tiktok-comments-scraper.
+
+        ``get_comments_after_likes`` (int, optional): only scrape comments for
+        posts whose ``likes`` exceed this threshold.
+        """
         if not kwargs.get("get_comments", False) or not documents:
             return documents
 
         max_comments = kwargs.get("max_comments", 15)
-        post_urls = [doc.data.get("url") for doc in documents if doc.data.get("url")]
+        likes_threshold = kwargs.get("get_comments_after_likes")
+        post_urls = []
+        for doc in documents:
+            url = doc.data.get("url")
+            if not url:
+                continue
+            if likes_threshold is not None and (doc.data.get("likes") or 0) <= likes_threshold:
+                continue
+            post_urls.append(url)
         if not post_urls:
             return documents
 
         logger.info("Scraping TikTok comments for %d posts (max %d per post)", len(post_urls), max_comments)
+        requested_urls = set(post_urls)
 
         run_input: Dict[str, Any] = {
             "commentsPerPost": max_comments,
@@ -127,7 +140,7 @@ class TikTokPostsActor(ApifyActor):
             if not isinstance(comment, dict):
                 continue
             video_url = comment.get("videoWebUrl")
-            if video_url:
+            if video_url in requested_urls:
                 grouped[video_url].append(comment)
 
         for doc in documents:
