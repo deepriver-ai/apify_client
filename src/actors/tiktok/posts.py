@@ -3,10 +3,9 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
-from urllib.parse import urlparse
 
 from src.actors.actor import ApifyActor
-from src.models.tiktok_post import TikTokPost
+from src.models.tiktok_post import TikTokPost, _map_tiktok_comments
 
 # TikTok Scraper
 # https://console.apify.com/actors/GdWCkxBtKWOsKjdch/
@@ -18,10 +17,8 @@ COUNTRY_ID_TO_PROXY_COUNTRY_CODE = {
 }
 
 APIFY_INPUT_KEYS = {
-    "commentsPerPost",
     "excludePinnedPosts",
     "hashtags",
-    "maxRepliesPerComment",
     "postURLs",
     "resultsPerPage",
     "scrapeRelatedVideos",
@@ -40,6 +37,7 @@ class TikTokPostsActor(ApifyActor):
     """Download TikTok posts from URLs, hashtags, or text searches."""
 
     actor_id = "GdWCkxBtKWOsKjdch"
+    comments_actor_id = "clockworks/tiktok-comments-scraper"
 
     def search(self, search_params: List[str], **kwargs) -> List[TikTokPost]:
         self.search_params_keywords = search_params
@@ -50,9 +48,6 @@ class TikTokPostsActor(ApifyActor):
             raw_results.extend(self.run_actor(self._build_run_input(links=links, **kwargs)))
         if hashtags or queries or not links:
             raw_results.extend(self.run_actor(self._build_run_input(hashtags=hashtags, queries=queries, **kwargs)))
-
-        if kwargs.get("get_comments"):
-            self._attach_comments_from_datasets(raw_results)
 
         posts = [TikTokPost.from_tiktok(item) for item in raw_results]
         return self.process_documents(posts, **kwargs)
@@ -65,13 +60,9 @@ class TikTokPostsActor(ApifyActor):
         **kwargs,
     ) -> Dict[str, Any]:
         results_limit = kwargs.get("results_limit") or kwargs.get("max_results", 30)
-        get_comments = kwargs.get("get_comments", False)
-        max_comments = kwargs.get("max_comments", 15)
 
         run_input: Dict[str, Any] = {
-            "commentsPerPost": max_comments if get_comments else 0,
             "excludePinnedPosts": False,
-            "maxRepliesPerComment": 0,
             "resultsPerPage": results_limit,
             "scrapeRelatedVideos": False,
             "searchSection": "/video",
@@ -104,48 +95,47 @@ class TikTokPostsActor(ApifyActor):
 
         return run_input
 
-    def _attach_comments_from_datasets(self, items: List[Dict[str, Any]]) -> None:
-        """Fetch Apify comment datasets and attach comments to matching raw posts."""
-        comments_by_dataset: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    def _enrich_comments(self, documents: List[TikTokPost], **kwargs) -> List[TikTokPost]:
+        """Scrape comments for filtered posts via clockworks/tiktok-comments-scraper."""
+        if not kwargs.get("get_comments", False) or not documents:
+            return documents
 
-        for item in items:
-            dataset_url = item.get("commentsDatasetUrl")
-            if not dataset_url:
-                continue
+        max_comments = kwargs.get("max_comments", 15)
+        post_urls = [doc.data.get("url") for doc in documents if doc.data.get("url")]
+        if not post_urls:
+            return documents
 
-            dataset_id = _extract_dataset_id(dataset_url)
-            if not dataset_id:
-                logger.warning("Could not parse TikTok comments dataset id from %s", dataset_url)
-                continue
+        logger.info("Scraping TikTok comments for %d posts (max %d per post)", len(post_urls), max_comments)
 
-            if dataset_id not in comments_by_dataset:
-                comments_by_dataset[dataset_id] = self._fetch_comments_by_video_url(dataset_id)
+        run_input: Dict[str, Any] = {
+            "commentsPerPost": max_comments,
+            "excludePinnedPosts": False,
+            "maxRepliesPerComment": 0,
+            "postURLs": post_urls,
+            "resultsPerPage": max_comments,
+        }
 
-            post_url = _post_url(item)
-            if not post_url:
-                continue
-            item["comments"] = comments_by_dataset[dataset_id].get(post_url, [])
-
-    def _fetch_comments_by_video_url(self, dataset_id: str) -> Dict[str, List[Dict[str, Any]]]:
         grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         try:
-            result = self.client.dataset(dataset_id).list_items()
-            comments = getattr(result, "items", result)
+            run = self.client.actor(self.comments_actor_id).call(run_input=run_input)
+            raw_comments = list(self.client.dataset(run["defaultDatasetId"]).iterate_items())
         except Exception as exc:
-            logger.warning("Could not fetch TikTok comments dataset %s: %s", dataset_id, exc)
-            return grouped
+            logger.warning("Could not fetch TikTok comments: %s", exc)
+            return documents
 
-        if not isinstance(comments, list):
-            return grouped
-
-        for comment in comments:
+        for comment in raw_comments:
             if not isinstance(comment, dict):
                 continue
             video_url = comment.get("videoWebUrl")
             if video_url:
                 grouped[video_url].append(comment)
 
-        return grouped
+        for doc in documents:
+            url = doc.data.get("url")
+            doc.data["comments"] = _map_tiktok_comments(grouped.get(url, [])) if url else []
+
+        logger.info("Enriched TikTok posts with %d total comments", len(raw_comments))
+        return documents
 
 
 def _split_search_params(search_params: List[str]) -> Tuple[List[str], List[str], List[str]]:
@@ -167,15 +157,3 @@ def _split_search_params(search_params: List[str]) -> Tuple[List[str], List[str]
             queries.append(value)
 
     return links, hashtags, queries
-
-
-def _extract_dataset_id(dataset_url: str) -> str | None:
-    path_parts = urlparse(dataset_url).path.strip("/").split("/")
-    try:
-        return path_parts[path_parts.index("datasets") + 1]
-    except (ValueError, IndexError):
-        return None
-
-
-def _post_url(item: Dict[str, Any]) -> str | None:
-    return item.get("webVideoUrl") or item.get("url") or item.get("videoUrl")

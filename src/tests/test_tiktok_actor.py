@@ -60,7 +60,8 @@ class TestTikTokSearchInput:
         assert "searchQueries" not in run_input
         assert "hashtags" not in run_input
         assert run_input["resultsPerPage"] == 5
-        assert run_input["commentsPerPost"] == 0
+        assert "commentsPerPost" not in run_input
+        assert "maxRepliesPerComment" not in run_input
         assert "proxyCountryCode" not in run_input
 
     def test_hashtags_and_queries_share_search_run(self, actor, sample_tiktok_item):
@@ -120,25 +121,17 @@ class TestTikTokSearchInput:
                 )
 
         run_input = mock_run.call_args[0][0]
-        assert run_input["commentsPerPost"] == 9
+        assert "commentsPerPost" not in run_input
+        assert "maxRepliesPerComment" not in run_input
         assert "proxyCountryCode" not in run_input
         assert run_input["shouldDownloadVideos"] is True
 
-    def test_downloads_comments_dataset_and_joins_by_video_url(self, actor, sample_tiktok_item):
+    def test_comment_actor_joins_by_video_url_after_filtering(self, actor, sample_tiktok_item):
         post_url = sample_tiktok_item["webVideoUrl"]
         other_url = "https://www.tiktok.com/@other/video/123"
-        raw_items = [
-            {
-                **sample_tiktok_item,
-                "comments": [],
-                "commentsDatasetUrl": "https://api.apify.com/v2/datasets/dataset123/items?signature=abc",
-            },
-            {
-                **sample_tiktok_item,
-                "webVideoUrl": other_url,
-                "comments": [],
-                "commentsDatasetUrl": "https://api.apify.com/v2/datasets/dataset123/items?signature=abc",
-            },
+        posts = [
+            TikTokPost.from_tiktok({**sample_tiktok_item, "comments": []}),
+            TikTokPost.from_tiktok({**sample_tiktok_item, "webVideoUrl": other_url, "comments": []}),
         ]
         comments = [
             {
@@ -156,30 +149,39 @@ class TestTikTokSearchInput:
                 "uniqueId": "otro.user",
             },
         ]
-        actor.client.dataset.return_value.list_items.return_value = MagicMock(items=comments)
+        actor.client.actor.return_value.call.return_value = {"defaultDatasetId": "comments-dataset"}
+        actor.client.dataset.return_value.iterate_items.return_value = iter(comments)
 
-        with patch.object(actor, "run_actor", return_value=raw_items):
-            with patch.object(actor, "process_documents", side_effect=lambda docs, **kwargs: docs):
-                results = actor.search(["valvoline"], get_comments=True, max_comments=5)
+        results = actor._enrich_comments(posts, get_comments=True, max_comments=5)
 
-        actor.client.dataset.assert_called_once_with("dataset123")
+        actor.client.actor.assert_called_once_with("clockworks/tiktok-comments-scraper")
+        run_input = actor.client.actor.return_value.call.call_args.kwargs["run_input"]
+        assert run_input == {
+            "commentsPerPost": 5,
+            "excludePinnedPosts": False,
+            "maxRepliesPerComment": 0,
+            "postURLs": [post_url, other_url],
+            "resultsPerPage": 5,
+        }
+        actor.client.dataset.assert_called_once_with("comments-dataset")
         assert results[0].data["comments"][0]["comment_text"] == "y esa quien es?"
         assert results[0].data["comments"][0]["comment_author"] == "itz.sonrisa.bonit"
         assert results[1].data["comments"][0]["comment_text"] == "otro comentario"
 
-    def test_comments_dataset_is_not_fetched_when_get_comments_false(self, actor, sample_tiktok_item):
-        raw_item = {
-            **sample_tiktok_item,
-            "comments": [],
-            "commentsDatasetUrl": "https://api.apify.com/v2/datasets/dataset123/items?signature=abc",
-        }
+    def test_comment_actor_not_called_when_get_comments_false(self, actor, sample_tiktok_item):
+        posts = [TikTokPost.from_tiktok({**sample_tiktok_item, "comments": []})]
+        results = actor._enrich_comments(posts, get_comments=False)
 
-        with patch.object(actor, "run_actor", return_value=[raw_item]):
-            with patch.object(actor, "process_documents", side_effect=lambda docs, **kwargs: docs):
-                results = actor.search(["valvoline"], get_comments=False)
-
+        actor.client.actor.assert_not_called()
         actor.client.dataset.assert_not_called()
         assert results[0].data["comments"] == []
+
+    def test_comment_actor_receives_only_documents_after_processing(self, actor, sample_tiktok_item):
+        with patch.object(actor, "run_actor", return_value=[sample_tiktok_item]):
+            with patch.object(actor, "process_documents", return_value=[]):
+                actor.search(["valvoline"], get_comments=True, max_comments=5)
+
+        actor.client.actor.assert_not_called()
 
 
 class TestTikTokMapping:
