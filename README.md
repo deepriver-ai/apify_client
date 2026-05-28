@@ -251,6 +251,8 @@ Social actors (Instagram, Facebook) override `_enrich_content` to dispatch enric
 
 TODO: Replace file-based filter cache with Redis for multi-process/distributed support.
 
+**Filtered-document diagnostics**: each actor exposes `actor.filtered_documents` after `process_documents()`/`search()`. It is reset per run and contains entries like `{"reason": "llm_filter", "url": "...", "title": "...", "type": "...", "metadata": {...}, "data": doc.data, "document": doc}`. Reasons include `cached`, `keyword`, `date`, `existing_elasticsearch`, `language`, `location`, and `llm_filter`.
+
 **Elasticsearch existing-doc filter**: `_filter_existing_in_elasticsearch` imports the sibling `elastic_client` package from `PYTHONPATH` and checks document URLs against `_id` in the `news` index. Use `source setup_local.sh` before local runs to add this repo and `/Users/oscarcuellar/ocn/media/elastic_client` to `PYTHONPATH`. Set `update_existing=true` when you want already-ingested URLs to continue through enrichment/publish as updates. Set `check_existing_elasticsearch=false` to disable the check for a run. If the local package or ES connection is unavailable, the stage logs a warning and keeps all documents.
 
 **Cost savings:** date filtering and the Elasticsearch existing-document check run before content enrichment, so old or already-ingested documents skip the expensive HTTP fetch + parse and social enrichment steps. Language filtering runs before location enrichment, so documents in the wrong language skip geocoding.

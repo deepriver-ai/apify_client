@@ -44,6 +44,9 @@ def test_existing_elasticsearch_filter_runs_before_content_enrichment():
 
     assert [doc.data["url"] for doc in result] == ["https://example.com/new"]
     assert actor.enriched_urls == ["https://example.com/new"]
+    assert [(entry["reason"], entry["url"]) for entry in actor.filtered_documents] == [
+        ("existing_elasticsearch", "https://example.com/existing")
+    ]
 
 
 def test_existing_elasticsearch_filter_can_be_disabled():

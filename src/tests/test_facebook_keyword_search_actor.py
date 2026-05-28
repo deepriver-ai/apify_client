@@ -37,3 +37,5 @@ def test_logs_urls_filtered_by_llm(caplog):
     assert result == [docs[0]]
     assert "Facebook keyword LLM filtered url=https://facebook.com/posts/2" in caplog.text
     assert "https://facebook.com/posts/1" not in caplog.text
+    assert actor.filtered_documents[0]["reason"] == "llm_filter"
+    assert actor.filtered_documents[0]["url"] == "https://facebook.com/posts/2"

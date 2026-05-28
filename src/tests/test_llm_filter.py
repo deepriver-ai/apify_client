@@ -200,6 +200,8 @@ class TestProcessDocumentsFilterCache:
         assert len(result) == 2
         key1 = actor._filter_cache_key(docs[1], self.TASK_ID)
         assert actor._filter_cache.get(key1) is False
+        assert actor.filtered_documents[0]["reason"] == "keyword"
+        assert actor.filtered_documents[0]["url"] == "https://example.com/1"
 
     def test_surviving_docs_cached_as_true(self, actor):
         docs = [Post()]
@@ -225,6 +227,8 @@ class TestProcessDocumentsFilterCache:
         result = actor.process_documents(docs, task_id=self.TASK_ID)
         assert len(result) == 2
         assert docs[1] not in result
+        assert actor.filtered_documents[0]["reason"] == "cached"
+        assert actor.filtered_documents[0]["url"] == "https://example.com/1"
 
     def test_different_tasks_independent_cache(self, actor):
         """Same URL can have different filter results for different tasks."""

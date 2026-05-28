@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -62,6 +63,7 @@ class ApifyActor:
         self.client = client or ApifyClient(APIFI_API_TOKEN)
         self.search_params_keywords: List[str] = []  # Should be set by the actor subclass when the scraping is keyword or hashtag-based
         self._filter_cache: Dict[str, bool] = self._load_filter_cache()
+        self.filtered_documents: List[Dict[str, Any]] = []
 
     def run_actor(self, run_input: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Run the Apify actor and return raw results."""
@@ -78,6 +80,54 @@ class ApifyActor:
         url = doc.data.get("url") or ""
         return f"filtered:{task_id}:{url}"
 
+    def _reset_filtered_documents(self) -> None:
+        """Reset per-run filtered document diagnostics."""
+        self.filtered_documents = []
+
+    def _record_filtered_documents(self, before: List, after: List, reason: str, **metadata) -> None:
+        """Store documents removed by a filter stage with a machine-readable reason."""
+        if not before:
+            return
+        kept_ids = {id(doc) for doc in after}
+        removed = [doc for doc in before if id(doc) not in kept_ids]
+        if not removed:
+            return
+
+        if not hasattr(self, "filtered_documents"):
+            self.filtered_documents = []
+
+        for doc in removed:
+            entry = {
+                "reason": reason,
+                "url": doc.data.get("url"),
+                "title": doc.data.get("title"),
+                "type": doc.data.get("type"),
+                "task_id": metadata.get("task_id"),
+                "metadata": {k: v for k, v in metadata.items() if v is not None},
+                "data": copy.deepcopy(doc.data),
+                "document": doc,
+            }
+            self.filtered_documents.append(entry)
+
+    def _filter_cached_documents(self, documents: List, task_id: str, override: bool = False) -> List:
+        """Skip docs previously cached as filtered-out for this task."""
+        if override or not task_id:
+            return documents
+
+        filtered = [
+            doc for doc in documents
+            if self._filter_cache.get(self._filter_cache_key(doc, task_id)) is not False
+        ]
+        self._record_filtered_documents(documents, filtered, "cached", task_id=task_id)
+        if len(filtered) < len(documents):
+            logger.info(
+                "Filter cache: %d → %d documents (skipped previously filtered for task %s)",
+                len(documents),
+                len(filtered),
+                task_id,
+            )
+        return filtered
+
     def process_documents(self, documents: List, **kwargs) -> List:
         """Run the full post-creation pipeline: filter → enrich → filter → enrich → filter.
 
@@ -91,16 +141,10 @@ class ApifyActor:
         override = kwargs.get("override_filters", False)
         task_id = kwargs.get("task_id", "")
         all_docs = documents
+        self._reset_filtered_documents()
 
         # Skip docs already cached as filtered-out for this task (unless overriding)
-        if not override and task_id:
-            before = len(documents)
-            documents = [
-                doc for doc in documents
-                if self._filter_cache.get(self._filter_cache_key(doc, task_id)) is not False
-            ]
-            if len(documents) < before:
-                logger.info("Filter cache: %d → %d documents (skipped previously filtered for task %s)", before, len(documents), task_id)
+        documents = self._filter_cached_documents(documents, task_id, override)
 
         documents = self._filter_keywords(documents, **kwargs)
         documents = self._filter_date(documents, **kwargs)
@@ -130,11 +174,13 @@ class ApifyActor:
         if not not_keywords:
             return documents
         before = len(documents)
+        original = documents
         filtered = []
         for doc in documents:
             text = ((doc.data.get("body") or "") + " " + (doc.data.get("title") or "")).lower()
             if not any(kw.lower() in text for kw in not_keywords):
                 filtered.append(doc)
+        self._record_filtered_documents(original, filtered, "keyword", not_keywords=not_keywords)
         logger.info("Keyword filter (%d keywords): %d → %d documents", len(not_keywords), before, len(filtered))
         return filtered
 
@@ -149,9 +195,10 @@ class ApifyActor:
         if not min_date or not isinstance(min_date, datetime):
             return documents
         before = len(documents)
-        documents = [doc for doc in documents if doc.matches_min_date(min_date)]
-        logger.info("Date filter (min_date=%s): %d → %d documents", min_date.date(), before, len(documents))
-        return documents
+        filtered = [doc for doc in documents if doc.matches_min_date(min_date)]
+        self._record_filtered_documents(documents, filtered, "date", min_date=min_date.isoformat())
+        logger.info("Date filter (min_date=%s): %d → %d documents", min_date.date(), before, len(filtered))
+        return filtered
 
     def _filter_existing_in_elasticsearch(self, documents: List, **kwargs) -> List:
         """Drop documents whose URL already exists as an id in the news index."""
@@ -172,12 +219,13 @@ class ApifyActor:
             return documents
 
         before = len(documents)
-        documents = [
+        filtered = [
             doc for doc in documents
             if not doc.data.get("url") or doc.data.get("url") not in existing_ids
         ]
-        logger.info("Elasticsearch existing-doc filter: %d → %d documents", before, len(documents))
-        return documents
+        self._record_filtered_documents(documents, filtered, "existing_elasticsearch", index="news")
+        logger.info("Elasticsearch existing-doc filter: %d → %d documents", before, len(filtered))
+        return filtered
 
     def _existing_news_ids(self, urls: List[str]) -> Set[str]:
         """Return URL ids that already exist in the Elasticsearch ``news`` index."""
@@ -207,9 +255,10 @@ class ApifyActor:
         if not language:
             return documents
         before = len(documents)
-        documents = [doc for doc in documents if doc.matches_language(language)]
-        logger.info("Language filter (%s): %d → %d documents", language, before, len(documents))
-        return documents
+        filtered = [doc for doc in documents if doc.matches_language(language)]
+        self._record_filtered_documents(documents, filtered, "language", language=language)
+        logger.info("Language filter (%s): %d → %d documents", language, before, len(filtered))
+        return filtered
 
     def _enrich_location(self, documents: List, **kwargs) -> List:
         """Enrich document location. Delegates to each document's enrich_location()."""
@@ -339,6 +388,13 @@ class ApifyActor:
                 logger.warning("LLM filter returned non-list result, keeping all docs in batch")
                 kept.extend(batch)
 
+        self._record_filtered_documents(
+            documents,
+            kept,
+            "llm_filter",
+            llm_filter_condition=condition,
+            snippet_max_len=snippet_max_len,
+        )
         logger.info("LLM filter: %d → %d documents", len(documents), len(kept))
         return kept
 
@@ -352,9 +408,10 @@ class ApifyActor:
         if not country_id:
             return documents
         before = len(documents)
-        documents = [doc for doc in documents if doc.matches_location(country_id)]
-        logger.info("Location filter (country_id=%s): %d → %d documents", country_id, before, len(documents))
-        return documents
+        filtered = [doc for doc in documents if doc.matches_location(country_id)]
+        self._record_filtered_documents(documents, filtered, "location", country_id=country_id)
+        logger.info("Location filter (country_id=%s): %d → %d documents", country_id, before, len(filtered))
+        return filtered
 
     def _enrich_comments(self, documents: List, **kwargs) -> List:
         """Enrich documents with comments. No-op by default; subclasses override."""

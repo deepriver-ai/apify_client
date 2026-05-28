@@ -32,15 +32,9 @@ class TwitterKeywordSearchActor(ApifyActor):
         override = kwargs.get("override_filters", False)
         task_id = kwargs.get("task_id", "")
         all_docs = documents
+        self._reset_filtered_documents()
 
-        if not override and task_id:
-            before = len(documents)
-            documents = [
-                doc for doc in documents
-                if self._filter_cache.get(self._filter_cache_key(doc, task_id)) is not False
-            ]
-            if len(documents) < before:
-                logger.info("Filter cache: %d → %d documents (skipped previously filtered for task %s)", before, len(documents), task_id)
+        documents = self._filter_cached_documents(documents, task_id, override)
 
         documents = self._filter_keywords(documents, **kwargs)
         documents = self._filter_date(documents, **kwargs)
