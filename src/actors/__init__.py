@@ -8,6 +8,7 @@ from src.actors.instagram.profile_posts import InstagramProfilePostsActor
 from src.actors.instagram.profile_queenlike import InstagramProfileQueenlikeActor
 from src.actors.linkedin.keyword_search import LinkedInKeywordSearchActor
 from src.actors.news.news_scraper import GoogleNewsActor
+from src.actors.tiktok.posts import TikTokPostsActor
 from src.actors.twitter.keyword_search import TwitterKeywordSearchActor
 
 ACTOR_REGISTRY = {
@@ -19,6 +20,7 @@ ACTOR_REGISTRY = {
     "facebook_keyword_search": FacebookKeywordSearchActor,
     "twitter_keyword_search": TwitterKeywordSearchActor,
     "linkedin_keyword_search": LinkedInKeywordSearchActor,
+    "tiktok_posts": TikTokPostsActor,
 }
 
 

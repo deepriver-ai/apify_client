@@ -9,7 +9,7 @@ from tldextract import TLDExtract
 from src.schema.types import EnumStr, Url, UrlList
 from src.helpers.str_fn import _is_valid_url
 
-news_types = ["news", "x", "facebook", "impreso", "instagram", "linkedin", "radio", "tv"]
+news_types = ["news", "x", "facebook", "impreso", "instagram", "linkedin", "tiktok", "radio", "tv"]
 
 
 def date_now(*args, **kwargs) -> datetime:

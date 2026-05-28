@@ -2,7 +2,7 @@
 
 Scrapes media and social media data via Apify actors, normalizes it through a declarative schema system, and publishes to RabbitMQ for downstream processing.
 
-Supported sources: News, Instagram, Facebook, X, LinkedIn (and others to be implemented).
+Supported sources: News, Instagram, Facebook, X, LinkedIn, TikTok (and others to be implemented).
 
 
 # Models (`src/models/`)
@@ -18,7 +18,7 @@ Base class for all media types (`src/models/document.py`).
 - `Document.matches_min_date(dt)` — checks if document's timestamp is >= the given datetime
 - `Document.matches_location(country_id)` — checks `location_ids` first: if non-empty, any geoid prefix match keeps the doc. Falls back to `author_location_id` when `location_ids` is empty. Non-geoid IDs (e.g. Instagram numeric) pass through. Documents with no location data are kept
 - `Document.enrich_location(**kwargs)` — abstract method; subclasses implement platform-specific location enrichment (geocoding for posts, SourcesManagement lookup for news)
-- `Document.to_final_schema()` — parses `self.data` against `NEWS_SCHEMA` and returns `{"type": "news", "message": parsed}`. The envelope `type` is always `"news"`; the inner `message.type` carries the actual platform (one of `news`, `x`, `facebook`, `instagram`, `linkedin`, `impreso`, `radio`, `tv`). Subclasses can override to add preprocessing, then call `super().to_final_schema()`
+- `Document.to_final_schema()` — parses `self.data` against `NEWS_SCHEMA` and returns `{"type": "news", "message": parsed}`. The envelope `type` is always `"news"`; the inner `message.type` carries the actual platform (one of `news`, `x`, `facebook`, `instagram`, `linkedin`, `tiktok`, `impreso`, `radio`, `tv`). Subclasses can override to add preprocessing, then call `super().to_final_schema()`
 
 ## News
 
@@ -32,7 +32,7 @@ News article model (`src/models/news.py`). Inherits from `Document`.
 
 ## Post
 
-Base social media post model (`src/models/post.py`). Inherits from `Document`. Platform-specific subclasses handle data mapping and set `data["type"]` to the real platform (`instagram`, `facebook`, `x`, `linkedin`).
+Base social media post model (`src/models/post.py`). Inherits from `Document`. Platform-specific subclasses handle data mapping and set `data["type"]` to the real platform (`instagram`, `facebook`, `x`, `linkedin`, `tiktok`).
 
 Posts share the same final envelope as News: `{"type": "news", "message": parsed}` where `parsed` is validated against `NEWS_SCHEMA`.
 
@@ -55,6 +55,12 @@ Instagram post model (`src/models/instagram_post.py`). Inherits from `Post`.
 Facebook post model (`src/models/facebook_post.py`). Inherits from `Post`.
 
 - `FacebookPost.from_facebook(item)` — class method mapping `text`, `likes`, `shares`, `comments` (count), media URLs (from `photo_image.uri` for photos, `browser_native_hd_url`/`browser_native_sd_url` for videos), and page name (extracted from URL). OCR text from media `ocrText` fields is appended to body as `\n\n image_text_1: <text>`, `\n\n image_text_2: <text>`, etc. (skips generic "May be an image of" descriptions). Facebook post types: `Photo`, `Video`, `Reel`, `Status`
+
+### TikTokPost
+
+TikTok post model (`src/models/tiktok_post.py`). Inherits from `Post`.
+
+- `TikTokPost.from_tiktok(item)` — class method mapping `text`/`desc`/`caption`, author metadata from `authorMeta`, engagement metrics (`diggCount`, `shareCount`, `playCount`, `commentCount`), media URLs (`videoUrl`, cover fields, `videoMeta`, image posts), embedded comments, and post type `Video`
 
 ## SourcesManagement
 
@@ -196,7 +202,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 | Column | Type | Required | Description |
 |---|---|---|---|
 | `task_id` | str | no | Unique task identifier. Auto-generated from `actor_class:search_params` if empty |
-| `actor_class` | str | yes | Registry key: `google_news`, `instagram_hashtags`, `facebook_page_posts` |
+| `actor_class` | str | yes | Registry key: `google_news`, `instagram_hashtags`, `facebook_page_posts`, `tiktok_posts` |
 | `search_params` | str | yes | Comma-separated search terms (quoted in CSV) |
 | `country_id` | str | no | Country filter, e.g. `_484` |
 | `language` | str | no | Language code, e.g. `es`, `en`. Filtered at Document level via detection |
@@ -223,6 +229,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 - **InstagramProfileQueenlikeActor**: `scrape_type` (default `"posts"` — also accepts `"reels"`), `output_mode` (default `"clean"`), plus all `InstagramProfilePostsActor` enrichment params (`fetch_attached_url`, `download_video`, `video_dir`, `enrich_followers`, `stats_max_age_days`, `get_comments`, `max_comments`, etc.). `search_params` are usernames (not URLs); the underlying actor accepts a single username per run, so `search()` loops over inputs internally. Surfaces `reshare_count` as `shares` (the default Instagram actors don't return shares) and embeds `author.follower_count` as `website_visits` so follower stats are available without an extra profile scrape
 - **FacebookPagePostsActor**: `fetch_attached_url`, `download_images`, `download_video`, `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 - **FacebookKeywordSearchActor**: `fetch_attached_url`, `recent_posts`, `location_uid`, `enrich_followers`, `stats_max_age_days` (default 90), `enrich_author_after_likes` (int, optional — only scrape profiles for posts whose `likes` exceed this threshold; cached stats still apply to all), `get_comments_after_likes` (int, optional — only scrape comments for posts whose `likes` exceed this threshold). Pipeline override: `_filter_llm` runs right after `_filter_language` so LLM-rejected posts skip author/location enrichment and comment scraping.
+- **TikTokPostsActor**: accepts links, hashtags, and text queries in `search_params`; syntax inference sends URLs as `postURLs`, values starting with `#` as `hashtags`, and other values as `searchQueries`. Direct Apify input overrides are supported through `actor_params` (e.g. `proxyCountryCode`, `searchSection`, `shouldDownloadVideos`, `shouldDownloadSubtitles`). `get_comments=true` maps to `commentsPerPost=max_comments`.
 
 ## Processing pipeline (`ApifyActor.process_documents`)
 
@@ -266,6 +273,7 @@ Language codes are normalized to ISO 639-1 via `normalize_language()` — accept
 | 1 | google_news | totalenergies | _484 | es | | d | 30 | true | true | false | | | | | false | {"timeframe":"1d","enrich":true} |
 | 2 | instagram_hashtags | totalenergies | _484 | es | | d | 50 | true | true | false | 15 | | elimina publicaciones no relacionadas con lubricantes | | false | {"keyword_search":false,"enrich_followers":true} |
 | 3 | facebook_page_posts | https://facebook.com/SomePage | _484 | es | | w | 20 | true | true | false | | spam\|ads | | | false | {"fetch_attached_url":true,"add_text_from_images":true} |
+| 4 | tiktok_posts | #lubricantes,totalenergies | _484 | es | | d | 100 | true | true | true | 5 | | elimina publicaciones no relacionadas con lubricantes | | false | {"proxyCountryCode":"MX"} |
 
 ## Running
 
@@ -285,6 +293,7 @@ Maps string keys to actor classes:
 | `instagram_profile_posts` | `InstagramProfilePostsActor` |
 | `instagram_profile_queenlike` | `InstagramProfileQueenlikeActor` |
 | `facebook_page_posts` | `FacebookPagePostsActor` |
+| `tiktok_posts` | `TikTokPostsActor` |
 
 
 # Pipelines
@@ -367,6 +376,7 @@ Current actors:
 - **`facebook/posts.py`** — `FacebookPagePostsActor` (actor `apify/facebook-posts-scraper`)
 - **`facebook/profiles.py`** — `FacebookProfileActor`, utility class wrapping `apify/facebook-pages-scraper`. Used internally by `FacebookPagePostsActor` for author enrichment. Not in the actor registry
 - **`facebook/comments.py`** — `FacebookCommentsActor`, utility class wrapping `apify/facebook-comments-scraper`. Used internally by `FacebookPagePostsActor` for comment enrichment. Not in the actor registry
+- **`tiktok/posts.py`** — `TikTokPostsActor` (actor `GdWCkxBtKWOsKjdch`). Scrapes TikTok videos from post URLs, hashtags, or search queries; embedded comments are requested via `commentsPerPost` when `get_comments=true`
 
 
 # Article parsing (`src/models/news_parser/`)
@@ -414,6 +424,7 @@ python -m pytest src/tests/ -v
 | `test_google_news_actor.py` | GoogleNewsActor: document creation, Apify params, date/language/period filters, final schema, get_comments no-op |
 | `test_instagram_actor.py` | InstagramHashtagActor: document creation, Apify params, date/period filters, comment enrichment, final schema with/without comments |
 | `test_facebook_actor.py` | FacebookPagePostsActor: FacebookPost.from_facebook mapping (photo/video/OCR/comments), search params, keyword filtering, _add_text_from_images, final schema; FacebookProfileActor: map_profile field mapping (likes → website_visits, title → author_full_name, info → author_profile_bio, address → author_location_text); _enrich_user_author pipeline (apply cached → scrape stale → save); FacebookCommentsActor: map_comment field mapping, group_by_post_url grouping/error-skipping/fallback; _enrich_comments pipeline (scrape → map → assign to posts) |
+| `test_tiktok_actor.py` | TikTokPostsActor: syntax inference for links/hashtags/queries, mixed input runs, Apify param overrides, TikTokPost mapping, final schema |
 | `test_social_enrichment.py` | Social enrichment: URL extraction, fetch_attached_url (article text append, location copy, no-overwrite), platform-specific NotImplementedError stubs |
 | `test_llm_filter.py` | LLM filtering: snippet building (keyword context vs first chars), batching, cache integration, override_filters, per-task filter cache |
 | `test_users_management.py` | UsersManagement: save/get stats and location, needs_stats_update staleness, persistence to disk |

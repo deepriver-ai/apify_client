@@ -117,7 +117,7 @@ class TestToFinalSchema:
         assert result["message"]["type"] == "news"
 
     def test_all_platform_types_accepted(self):
-        for platform in ("news", "x", "facebook", "instagram", "linkedin", "radio", "tv"):
+        for platform in ("news", "x", "facebook", "instagram", "linkedin", "tiktok", "radio", "tv"):
             doc = Document(_valid_data(type=platform))
             result = doc.to_final_schema()
             assert result["message"]["type"] == platform
