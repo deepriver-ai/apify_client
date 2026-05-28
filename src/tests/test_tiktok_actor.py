@@ -101,6 +101,14 @@ class TestTikTokSearchInput:
             with pytest.raises(ValueError, match="country_id='_999'"):
                 actor.search(["valvoline"], country_id="_999")
 
+    def test_proxy_country_code_override_is_ignored(self, actor, sample_tiktok_item):
+        with patch.object(actor, "run_actor", return_value=[sample_tiktok_item]) as mock_run:
+            with patch.object(actor, "process_documents", side_effect=lambda docs, **kwargs: docs):
+                actor.search(["valvoline"], proxyCountryCode="US", apify_input={"proxyCountryCode": "US"})
+
+        run_input = mock_run.call_args[0][0]
+        assert "proxyCountryCode" not in run_input
+
     def test_comments_and_actor_params_override_defaults(self, actor, sample_tiktok_item):
         with patch.object(actor, "run_actor", return_value=[sample_tiktok_item]) as mock_run:
             with patch.object(actor, "process_documents", side_effect=lambda docs, **kwargs: docs):
