@@ -124,6 +124,63 @@ class TestTikTokSearchInput:
         assert "proxyCountryCode" not in run_input
         assert run_input["shouldDownloadVideos"] is True
 
+    def test_downloads_comments_dataset_and_joins_by_video_url(self, actor, sample_tiktok_item):
+        post_url = sample_tiktok_item["webVideoUrl"]
+        other_url = "https://www.tiktok.com/@other/video/123"
+        raw_items = [
+            {
+                **sample_tiktok_item,
+                "comments": [],
+                "commentsDatasetUrl": "https://api.apify.com/v2/datasets/dataset123/items?signature=abc",
+            },
+            {
+                **sample_tiktok_item,
+                "webVideoUrl": other_url,
+                "comments": [],
+                "commentsDatasetUrl": "https://api.apify.com/v2/datasets/dataset123/items?signature=abc",
+            },
+        ]
+        comments = [
+            {
+                "videoWebUrl": post_url,
+                "text": "y esa quien es?",
+                "createTimeISO": "2026-05-24T05:01:26.000Z",
+                "diggCount": 3,
+                "uniqueId": "itz.sonrisa.bonit",
+            },
+            {
+                "videoWebUrl": other_url,
+                "text": "otro comentario",
+                "createTimeISO": "2026-05-24T05:02:26.000Z",
+                "diggCount": 1,
+                "uniqueId": "otro.user",
+            },
+        ]
+        actor.client.dataset.return_value.list_items.return_value = MagicMock(items=comments)
+
+        with patch.object(actor, "run_actor", return_value=raw_items):
+            with patch.object(actor, "process_documents", side_effect=lambda docs, **kwargs: docs):
+                results = actor.search(["valvoline"], get_comments=True, max_comments=5)
+
+        actor.client.dataset.assert_called_once_with("dataset123")
+        assert results[0].data["comments"][0]["comment_text"] == "y esa quien es?"
+        assert results[0].data["comments"][0]["comment_author"] == "itz.sonrisa.bonit"
+        assert results[1].data["comments"][0]["comment_text"] == "otro comentario"
+
+    def test_comments_dataset_is_not_fetched_when_get_comments_false(self, actor, sample_tiktok_item):
+        raw_item = {
+            **sample_tiktok_item,
+            "comments": [],
+            "commentsDatasetUrl": "https://api.apify.com/v2/datasets/dataset123/items?signature=abc",
+        }
+
+        with patch.object(actor, "run_actor", return_value=[raw_item]):
+            with patch.object(actor, "process_documents", side_effect=lambda docs, **kwargs: docs):
+                results = actor.search(["valvoline"], get_comments=False)
+
+        actor.client.dataset.assert_not_called()
+        assert results[0].data["comments"] == []
+
 
 class TestTikTokMapping:
     def test_raw_item_maps_to_post(self, sample_tiktok_item):

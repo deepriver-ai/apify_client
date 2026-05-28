@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import Any, Dict, List, Tuple
+from urllib.parse import urlparse
 
 from src.actors.actor import ApifyActor
 from src.models.tiktok_post import TikTokPost
@@ -48,6 +50,9 @@ class TikTokPostsActor(ApifyActor):
             raw_results.extend(self.run_actor(self._build_run_input(links=links, **kwargs)))
         if hashtags or queries or not links:
             raw_results.extend(self.run_actor(self._build_run_input(hashtags=hashtags, queries=queries, **kwargs)))
+
+        if kwargs.get("get_comments"):
+            self._attach_comments_from_datasets(raw_results)
 
         posts = [TikTokPost.from_tiktok(item) for item in raw_results]
         return self.process_documents(posts, **kwargs)
@@ -99,6 +104,49 @@ class TikTokPostsActor(ApifyActor):
 
         return run_input
 
+    def _attach_comments_from_datasets(self, items: List[Dict[str, Any]]) -> None:
+        """Fetch Apify comment datasets and attach comments to matching raw posts."""
+        comments_by_dataset: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+
+        for item in items:
+            dataset_url = item.get("commentsDatasetUrl")
+            if not dataset_url:
+                continue
+
+            dataset_id = _extract_dataset_id(dataset_url)
+            if not dataset_id:
+                logger.warning("Could not parse TikTok comments dataset id from %s", dataset_url)
+                continue
+
+            if dataset_id not in comments_by_dataset:
+                comments_by_dataset[dataset_id] = self._fetch_comments_by_video_url(dataset_id)
+
+            post_url = _post_url(item)
+            if not post_url:
+                continue
+            item["comments"] = comments_by_dataset[dataset_id].get(post_url, [])
+
+    def _fetch_comments_by_video_url(self, dataset_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        try:
+            result = self.client.dataset(dataset_id).list_items()
+            comments = getattr(result, "items", result)
+        except Exception as exc:
+            logger.warning("Could not fetch TikTok comments dataset %s: %s", dataset_id, exc)
+            return grouped
+
+        if not isinstance(comments, list):
+            return grouped
+
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            video_url = comment.get("videoWebUrl")
+            if video_url:
+                grouped[video_url].append(comment)
+
+        return grouped
+
 
 def _split_search_params(search_params: List[str]) -> Tuple[List[str], List[str], List[str]]:
     links: List[str] = []
@@ -119,3 +167,15 @@ def _split_search_params(search_params: List[str]) -> Tuple[List[str], List[str]
             queries.append(value)
 
     return links, hashtags, queries
+
+
+def _extract_dataset_id(dataset_url: str) -> str | None:
+    path_parts = urlparse(dataset_url).path.strip("/").split("/")
+    try:
+        return path_parts[path_parts.index("datasets") + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def _post_url(item: Dict[str, Any]) -> str | None:
+    return item.get("webVideoUrl") or item.get("url") or item.get("videoUrl")
