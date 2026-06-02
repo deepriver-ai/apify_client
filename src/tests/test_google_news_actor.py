@@ -61,6 +61,33 @@ class TestSearchCreatesDocuments:
         assert run_input["maxArticles"] == 5
         assert run_input["timeframe"] == "7d"
         assert run_input["region_language"] == "US:en"
+        assert run_input["topics"] == []
+
+    def test_topics_param_sent_to_apify(self, actor, sample_google_news_results):
+        with patch.object(actor, "run_actor", return_value=sample_google_news_results) as mock_run:
+            with patch.object(News, "fetch_and_parse", return_value=True):
+                actor.search(
+                    ["markets"],
+                    topics=["BUSINESS", "TECHNOLOGY"],
+                    enrich=False,
+                )
+        run_input = mock_run.call_args[0][0]
+        assert run_input["topics"] == ["BUSINESS", "TECHNOLOGY"]
+
+    def test_single_topic_string_is_accepted(self, actor, sample_google_news_results):
+        with patch.object(actor, "run_actor", return_value=sample_google_news_results) as mock_run:
+            with patch.object(News, "fetch_and_parse", return_value=True):
+                actor.search(
+                    ["health"],
+                    topics="health",
+                    enrich=False,
+                )
+        run_input = mock_run.call_args[0][0]
+        assert run_input["topics"] == ["HEALTH"]
+
+    def test_invalid_topic_raises(self, actor):
+        with pytest.raises(ValueError, match="Invalid Google News topic"):
+            actor.search(["test"], topics=["POLITICS"], enrich=False)
 
 
 class TestDateFilter:

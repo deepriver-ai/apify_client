@@ -6,10 +6,17 @@ import logging
 import os
 from typing import Any, Dict, List, Set
 
-from src.helpers.mongoconnection import mongoconn
 from src.helpers.str_fn import domainsplitter, get_domain
 
 logger = logging.getLogger(__name__)
+
+try:
+    from src.helpers.mongoconnection import mongoconn
+except Exception as ex:
+    mongoconn = None
+    _MONGO_IMPORT_ERROR: Exception | None = ex
+else:
+    _MONGO_IMPORT_ERROR = None
 
 DEFAULT_CACHE_PATH = "cache/unknown_sources.json"
 
@@ -37,8 +44,23 @@ _BLACKLISTED_PATH_PREFIXES: Dict[str, tuple] = {
 
 def _load_sources() -> List[Dict[str, Any]]:
     """Fetch all sources from MongoDB CrawlersAll collection."""
+    if mongoconn is None:
+        raise RuntimeError(f"MongoDB client unavailable: {_MONGO_IMPORT_ERROR}")
     cursor = mongoconn.admin_app.CrawlersAll.find()
     return [copy.deepcopy(site) for site in cursor]
+
+
+def _load_sources_safe() -> tuple[List[Dict[str, Any]], bool]:
+    """Fetch source records, falling back to an empty catalog if Mongo is unavailable."""
+    try:
+        return _load_sources(), True
+    except Exception as ex:
+        logger.warning(
+            "MongoDB source catalog unavailable; news source/location enrichment "
+            "will be skipped for this process: %s",
+            ex,
+        )
+        return [], False
 
 
 def _build_known_sources(sources: List[Dict[str, Any]]) -> Set[str]:
@@ -82,8 +104,9 @@ def _build_domain_location(sources: List[Dict[str, Any]]) -> Dict[str, Dict[str,
     return result
 
 
-# Module-level data loaded once from Mongo
-_sources = _load_sources()
+# Module-level data loaded once from Mongo. When Mongo is unavailable, use an
+# explicit empty catalog so imports and news scraping can continue safely.
+_sources, _SOURCE_CATALOG_AVAILABLE = _load_sources_safe()
 _known_sources = _build_known_sources(_sources)
 _domain_country_id = _build_domain_country_id(_sources)
 _domain_source_name = _build_domain_source_name(_sources)
@@ -100,6 +123,10 @@ class SourcesManagement:
     def __init__(self, cache_path: str = DEFAULT_CACHE_PATH):
         self.cache_path = cache_path
         self._unknown: List[Dict[str, str]] = []
+
+    def source_catalog_available(self) -> bool:
+        """Return True when Mongo-backed source metadata loaded successfully."""
+        return _SOURCE_CATALOG_AVAILABLE
 
     # --- Blacklist ---
 
@@ -174,6 +201,9 @@ class SourcesManagement:
 
         Returns True if known, False if unknown (and records it for later saving).
         """
+        if not _SOURCE_CATALOG_AVAILABLE:
+            return False
+
         domain = get_domain(url)
         if domain in _known_sources:
             return True
@@ -186,6 +216,10 @@ class SourcesManagement:
 
     def save(self) -> None:
         """Load existing unknown sources from cache, prune known ones, merge new entries, and write back."""
+        if not _SOURCE_CATALOG_AVAILABLE:
+            logger.info("Skipping unknown-source cache save because MongoDB source catalog is unavailable")
+            return
+
         existing: List[Dict[str, str]] = []
         if os.path.exists(self.cache_path):
             try:

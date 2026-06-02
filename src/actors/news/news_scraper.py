@@ -11,6 +11,17 @@ from src.models.news import News
 
 logger = logging.getLogger(__name__)
 
+GOOGLE_NEWS_TOPICS = {
+    "WORLD",
+    "NATION",
+    "BUSINESS",
+    "TECHNOLOGY",
+    "ENTERTAINMENT",
+    "SPORTS",
+    "SCIENCE",
+    "HEALTH",
+}
+
 
 class GoogleNewsActor(ApifyActor):
 
@@ -24,10 +35,11 @@ class GoogleNewsActor(ApifyActor):
         decode_urls = kwargs.get("decode_urls", True)
         extract_descriptions = kwargs.get("extract_descriptions", True)
         extract_images = kwargs.get("extract_images", False)
+        topics = self._normalize_topics(kwargs.get("topics"))
 
         run_input: Dict[str, Any] = {
             "keywords": search_params,
-            "topics": [],
+            "topics": topics,
             "topicUrls": [],
             "maxArticles": max_articles,
             "timeframe": timeframe,
@@ -42,6 +54,26 @@ class GoogleNewsActor(ApifyActor):
         articles = [News.from_google_news(item) for item in raw_results]
 
         return self.process_documents(articles, **kwargs)
+
+    @staticmethod
+    def _normalize_topics(raw_topics: Any) -> List[str]:
+        """Normalize Google News topic filters from actor_params."""
+        if raw_topics is None or raw_topics == "":
+            return []
+
+        if isinstance(raw_topics, str):
+            topics = [raw_topics]
+        elif isinstance(raw_topics, list):
+            topics = raw_topics
+        else:
+            raise ValueError("GoogleNewsActor topics must be a string or list of strings")
+
+        normalized = [str(topic).strip().upper() for topic in topics if str(topic).strip()]
+        invalid = [topic for topic in normalized if topic not in GOOGLE_NEWS_TOPICS]
+        if invalid:
+            allowed = ", ".join(sorted(GOOGLE_NEWS_TOPICS))
+            raise ValueError(f"Invalid Google News topic(s): {', '.join(invalid)}. Allowed topics: {allowed}")
+        return normalized
 
     def _enrich_content(self, documents: List, **kwargs) -> List:
         """Fetch and parse each news article (HTTP + content extraction)."""

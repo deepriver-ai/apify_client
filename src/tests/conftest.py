@@ -108,6 +108,6 @@ def mock_sources_manager():
     }
     mgr.check_source.return_value = True
     mgr.save.return_value = None
+    mgr.source_catalog_available.return_value = True
     return mgr
-
 

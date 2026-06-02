@@ -39,7 +39,7 @@ class News(Document):
         final_url = news.data.get("url") or url
         domain = cls.sources_manager.get_domain(final_url)
         cls.sources_manager.check_source(final_url, news.data.get("source"))
-        if domain:
+        if domain and cls.sources_manager.source_catalog_available():
             if news.data.get("source") is None:
                 news.data["source"] = cls.sources_manager.get_source_name(domain)
             location = cls.sources_manager.get_location(domain)
@@ -108,6 +108,9 @@ class News(Document):
         """
         url = self.data.get("url")
         if not url:
+            return
+        if not self.sources_manager.source_catalog_available():
+            logger.info("Skipping news source/location enrichment because MongoDB source catalog is unavailable")
             return
         domain = self.sources_manager.get_domain(url)
         location = self.sources_manager.get_location(domain)

@@ -68,6 +68,8 @@ A source refers to the publisher of a news article, it is the news media site an
 Single interface for all source-related operations (`src/models/sources_management.py`). 
 Sources are stored in a MongoDB database,  (connection via `src/helpers/mongoconnection.py`) at module load and builds lookup dicts internally.
 
+If MongoDB is not reachable when the module loads, `SourcesManagement` falls back to an explicit empty source catalog. In that state, news source/location enrichment is skipped, Mongo-backed source names and locations are not applied, and `cache/unknown_sources.json` is not updated because known-source pruning cannot be trusted.
+
 **Unknown source tracking:**
 - `check_source(url, source_name)` — returns `True` if the URL's domain is known (exists in MongoDB); otherwise records it as unknown
 - `save()` — loads existing unknowns from `cache/unknown_sources.json`, prunes any that became known, merges new entries, and writes back
@@ -223,7 +225,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 
 ## Actor-specific params (via `actor_params`)
 
-- **GoogleNewsActor**: `timeframe`, `region_language`, `decode_urls`, `extract_descriptions`, `extract_images`, `enrich`
+- **GoogleNewsActor**: `timeframe`, `region_language`, `topics`, `decode_urls`, `extract_descriptions`, `extract_images`, `enrich`. `topics` is optional in `actor_params` and accepts a string or list using Google News topic keys: `WORLD`, `NATION`, `BUSINESS`, `TECHNOLOGY`, `ENTERTAINMENT`, `SPORTS`, `SCIENCE`, `HEALTH` (e.g. `{"topics":["BUSINESS","TECHNOLOGY"]}`).
 - **InstagramHashtagActor**: `keyword_search`, `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 - **InstagramProfilePostsActor**: `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `video_dir` (default `cache/media/instagram`), `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 - **InstagramProfileQueenlikeActor**: `scrape_type` (default `"posts"` — also accepts `"reels"`), `output_mode` (default `"clean"`), plus all `InstagramProfilePostsActor` enrichment params (`fetch_attached_url`, `download_video`, `video_dir`, `enrich_followers`, `stats_max_age_days`, `get_comments`, `max_comments`, etc.). `search_params` are usernames (not URLs); the underlying actor accepts a single username per run, so `search()` loops over inputs internally. Surfaces `reshare_count` as `shares` (the default Instagram actors don't return shares) and embeds `author.follower_count` as `website_visits` so follower stats are available without an extra profile scrape
