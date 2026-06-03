@@ -17,8 +17,15 @@ from src.models.crawl_task import CrawlTask, load_tasks
 logger = logging.getLogger(__name__)
 
 DEFAULT_TASKS_CSV = "tasks.xlsx"
-CURRENT_THEME = "queretaro"
+#CURRENT_THEME = "queretaro"
+#CURRENT_THEME = "top_news"
+#CURRENT_THEME = "felifer"
+CURRENT_THEME = "chepe_guerrero"
 
+# Global override: when True, dismiss the cached filtered-out documents for every
+# task (all actors), re-running all filters from scratch regardless of each task's
+# own `override_filters` value. Equivalent to forcing override_filters=True everywhere.
+OVERRIDE_FILTERED_CACHE = False
 
 
 if __name__ == "__main__":
@@ -38,6 +45,8 @@ if __name__ == "__main__":
         try:
             actor = get_actor(task.actor_class)
             kwargs = task.to_actor_kwargs()
+            if OVERRIDE_FILTERED_CACHE:
+                kwargs["override_filters"] = True
             documents = actor.search(task.search_params, **kwargs)
             logger.info("Got %d documents from %s (post-filter)", len(documents), task.actor_class)
 
