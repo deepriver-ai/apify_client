@@ -319,29 +319,65 @@ class ApifyActor:
         except OSError:
             logger.warning("Could not save filter cache to %s", FILTER_CACHE_PATH)
 
+    def _llm_filter_cache_id(self, doc, condition: str, snippet_max_len: int):
+        """Per-document LLM-filter cache key: (url, condition, snippet_max_len).
+
+        Keyed on the document URL (not on batch contents), so a decision is
+        reused regardless of which batch the document later lands in, and survives
+        across tasks that share the same condition. Returns None when the document
+        has no URL (those documents can't be stably cached and are always re-sent).
+        """
+        url = doc.data.get("url")
+        if not url:
+            return None
+        return (url, condition, snippet_max_len)
+
     def _filter_llm(self, documents: List, **kwargs) -> List:
         """Filter documents using an LLM based on a natural-language condition.
 
-        Sends all documents to the LLM in batches. Caching is handled at the
-        pipeline level by ``process_documents()``.
+        Each document's keep/drop decision is cached per ``(url, condition,
+        snippet_max_len)`` (see ``_llm_filter_cache_id``). Documents with a cached
+        decision are resolved up front; only undecided ones are sent to the LLM,
+        batched ``LLM_FILTER_BATCH_SIZE`` at a time, and each resulting decision is
+        written back to the cache. ``override_filters`` bypasses the cache read so
+        every document is re-evaluated (results are still written back).
 
         Skipped entirely if ``llm_filter_condition`` is not provided in kwargs.
         """
         condition = kwargs.get("llm_filter_condition")
         snippet_max_len = kwargs.get("snippet_max_len", 250)
-        
+        override = kwargs.get("override_filters", False)
+
         if not condition:
             return documents
         if not documents:
             return documents
 
-        from src.oai.llm_core import get_text_content, llm_cached_call, parse_json_response
+        from src.oai.llm_core import (
+            cache_get,
+            cache_set,
+            get_text_content,
+            llm_cached_call,
+            parse_json_response,
+        )
 
         system_prompt = LLM_FILTER_SYSTEM_PROMPT.format(condition=condition)
-        kept = []
 
-        for batch_start in range(0, len(documents), LLM_FILTER_BATCH_SIZE):
-            batch = documents[batch_start:batch_start + LLM_FILTER_BATCH_SIZE]
+        # 1. Resolve any decisions already cached per (url, condition, snippet_max_len);
+        #    only undecided documents are sent to the LLM.
+        decisions: Dict[int, bool] = {}
+        pending: List = []
+        for doc in documents:
+            cache_id = self._llm_filter_cache_id(doc, condition, snippet_max_len)
+            cached = cache_get("llm_filter", cache_id, "keep") if (cache_id and not override) else None
+            if cached is None:
+                pending.append(doc)
+            else:
+                decisions[id(doc)] = bool(cached)
+
+        # 2. Evaluate undecided documents in batches and cache each decision.
+        for batch_start in range(0, len(pending), LLM_FILTER_BATCH_SIZE):
+            batch = pending[batch_start:batch_start + LLM_FILTER_BATCH_SIZE]
             lines = []
             for i, doc in enumerate(batch, start=1):
                 snippet = self._build_snippet(doc, max_len=snippet_max_len)
@@ -372,21 +408,29 @@ class ApifyActor:
                 return parse_json_response(text)
 
             result = llm_cached_call(
-                cache_tag="llm_filter",
+                cache_tag="llm_filter_batch",
                 request_id=batch_cache_id,
                 cache_field="keep_indices",
                 messages_builder=build_messages,
                 parse_fn=parse_fn,
+                override=override,
             )
 
             if isinstance(result, list):
                 keep_set = set(result)
-                for i, doc in enumerate(batch, start=1):
-                    if i in keep_set:
-                        kept.append(doc)
             else:
                 logger.warning("LLM filter returned non-list result, keeping all docs in batch")
-                kept.extend(batch)
+                keep_set = set(range(1, len(batch) + 1))
+
+            for i, doc in enumerate(batch, start=1):
+                keep = i in keep_set
+                decisions[id(doc)] = keep
+                cache_id = self._llm_filter_cache_id(doc, condition, snippet_max_len)
+                if cache_id:
+                    cache_set("llm_filter", cache_id, "keep", keep)
+
+        # 3. Keep documents (preserving order) whose decision is keep.
+        kept = [doc for doc in documents if decisions.get(id(doc), True)]
 
         self._record_filtered_documents(
             documents,
@@ -395,7 +439,13 @@ class ApifyActor:
             llm_filter_condition=condition,
             snippet_max_len=snippet_max_len,
         )
-        logger.info("LLM filter: %d → %d documents", len(documents), len(kept))
+        logger.info(
+            "LLM filter: %d → %d documents (%d resolved from cache, %d sent to LLM)",
+            len(documents),
+            len(kept),
+            len(documents) - len(pending),
+            len(pending),
+        )
         return kept
 
     def _enrich_user_author(self, documents: List, **kwargs) -> List:

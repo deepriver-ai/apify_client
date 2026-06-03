@@ -21,6 +21,20 @@ def actor():
     return a
 
 
+@pytest.fixture(autouse=True)
+def isolate_llm_cache(tmp_path, monkeypatch):
+    """Isolate the per-document LLM-filter cache (cache_get/cache_set) per test.
+
+    Points the file cache at a tmp dir and clears the in-memory cache so cached
+    decisions don't leak across tests or persist to the repo's cache/llm_core.
+    """
+    import src.oai.llm_core as llm_core
+
+    monkeypatch.setattr(llm_core, "cache_path", str(tmp_path / "llm_core"))
+    monkeypatch.setattr(llm_core, "tagged", {})
+    yield
+
+
 class TestBuildSnippet:
     """Test _build_snippet keyword context extraction."""
 
@@ -177,6 +191,73 @@ class TestFilterLlm:
         assert "[1]" in user_msg
         assert "[2]" in user_msg
         assert "totalenergies" in user_msg
+
+
+class TestFilterLlmPerDocCache:
+    """Test per-(url, condition, snippet_max_len) caching of LLM decisions."""
+
+    def test_decisions_cached_and_reused(self, actor):
+        docs = []
+        for i in range(2):
+            d = Post()
+            d.data["body"] = f"Post {i}"
+            d.data["url"] = f"https://example.com/{i}"
+            docs.append(d)
+
+        # First run hits the LLM (keep doc 0, drop doc 1) and caches both decisions.
+        with patch("src.oai.llm_core.llm_cached_call", return_value=[1]) as m1:
+            result1 = actor._filter_llm(docs, llm_filter_condition="cond")
+        assert m1.call_count == 1
+        assert result1 == [docs[0]]
+
+        # Second run resolves both from the per-doc cache — no LLM call, same outcome
+        # even though the (ignored) mock would now return a different answer.
+        with patch("src.oai.llm_core.llm_cached_call", return_value=[1, 2]) as m2:
+            result2 = actor._filter_llm(docs, llm_filter_condition="cond")
+        assert m2.call_count == 0
+        assert result2 == [docs[0]]
+
+    def test_different_snippet_len_is_separate_cache(self, actor):
+        """The two pipeline passes (250 vs 2500) must not share a cache entry."""
+        d = Post()
+        d.data["body"] = "Post"
+        d.data["url"] = "https://example.com/0"
+
+        with patch("src.oai.llm_core.llm_cached_call", return_value=[1]) as m1:
+            actor._filter_llm([d], llm_filter_condition="cond", snippet_max_len=250)
+        assert m1.call_count == 1
+
+        # Different snippet_max_len → distinct key → LLM is consulted again.
+        with patch("src.oai.llm_core.llm_cached_call", return_value=[1]) as m2:
+            actor._filter_llm([d], llm_filter_condition="cond", snippet_max_len=2500)
+        assert m2.call_count == 1
+
+    def test_override_filters_reevaluates(self, actor):
+        d = Post()
+        d.data["body"] = "Post"
+        d.data["url"] = "https://example.com/0"
+
+        # Cache it as dropped.
+        with patch("src.oai.llm_core.llm_cached_call", return_value=[]):
+            assert actor._filter_llm([d], llm_filter_condition="cond") == []
+
+        # override_filters bypasses the cache read and re-evaluates (now kept).
+        with patch("src.oai.llm_core.llm_cached_call", return_value=[1]) as m:
+            result = actor._filter_llm([d], llm_filter_condition="cond", override_filters=True)
+        assert m.call_count == 1
+        assert result == [d]
+
+    def test_urlless_docs_always_sent(self, actor):
+        d = Post()
+        d.data["body"] = "Post without a url"  # no url → not cacheable
+
+        with patch("src.oai.llm_core.llm_cached_call", return_value=[1]) as m1:
+            actor._filter_llm([d], llm_filter_condition="cond")
+        assert m1.call_count == 1
+
+        with patch("src.oai.llm_core.llm_cached_call", return_value=[1]) as m2:
+            actor._filter_llm([d], llm_filter_condition="cond")
+        assert m2.call_count == 1  # still sent — url-less docs are never cached
 
 
 class TestProcessDocumentsFilterCache:

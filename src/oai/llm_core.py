@@ -139,6 +139,28 @@ def llm_cached_call(
     return value
 
 
+def cache_get(cache_tag: str, request_id: Any, cache_field: str) -> Optional[Any]:
+    """Read a cached value (memory or disk) for ``(cache_tag, request_id)``.
+
+    Returns ``None`` when no value has been cached for ``cache_field``. Note that
+    a legitimately cached ``False`` is returned as ``False`` (not ``None``), so
+    callers can distinguish "absent" from "cached as falsy".
+    """
+    return _load_cached((cache_tag, request_id), cache_field)
+
+
+def cache_set(cache_tag: str, request_id: Any, cache_field: str, value: Any) -> None:
+    """Write ``value`` under ``cache_field`` for ``(cache_tag, request_id)``.
+
+    Merges into any existing entry so multiple fields can coexist on one key.
+    """
+    cache_id = (cache_tag, request_id)
+    payload = dict(tagged.get(cache_id) or {})
+    payload[cache_field] = value
+    payload['id'] = cache_id
+    _persist_cache(cache_id, payload)
+
+
 def parse_json_response(content: str) -> Any:
     """Parse a JSON response from the LLM, handling common formatting issues."""
     return json.loads(content.replace('`', '').replace('json', ''))
