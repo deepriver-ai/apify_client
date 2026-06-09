@@ -1,0 +1,12 @@
+.idea
+.gitignore
+.mcp.json
+.DS_Store
+.env*
+cache
+*.pyc
+*.pyo
+__pycache__/
+~$tasks.xlsx
+*.md
+src/tests
