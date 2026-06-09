@@ -1,5 +1,5 @@
 apify_client
-newsplease
+news-please==1.6.16
 newspaper4k
 pika
 python-dateutil
