@@ -21,11 +21,13 @@ DEFAULT_TASKS_CSV = "tasks.xlsx"
 #CURRENT_THEME = "top_news"
 #CURRENT_THEME = "felifer"
 CURRENT_THEME = "chepe_guerrero"
+CURRENT_THEME = "efren_cuevas"
+CURRENT_THEME = "mc"
 
 # Global override: when True, dismiss the cached filtered-out documents for every
 # task (all actors), re-running all filters from scratch regardless of each task's
 # own `override_filters` value. Equivalent to forcing override_filters=True everywhere.
-OVERRIDE_FILTERED_CACHE = False
+OVERRIDE_FILTERED_CACHE = True
 
 
 if __name__ == "__main__":
@@ -40,6 +42,7 @@ if __name__ == "__main__":
         tasks = [t for t in tasks if t.theme == CURRENT_THEME]
         logger.info("Filtered to %d tasks with theme=%s", len(tasks), CURRENT_THEME)
 
+    all_documents = []
     for task in reversed(tasks):
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
@@ -71,7 +74,9 @@ if __name__ == "__main__":
                         logger.error("Error publishing document: %s", e)
                         logger.error("Document data: %s\n\n", doc.data)
                 logger.info("Published %d documents to RabbitMQ", len(expanded))
-
+            
+                all_documents.extend(expanded)
+            
             else:
                 runs_dir = os.path.join("cache", "runs")
                 os.makedirs(runs_dir, exist_ok=True)
