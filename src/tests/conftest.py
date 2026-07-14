@@ -19,6 +19,9 @@ sys.modules.setdefault("src.helpers.mongoconnection", MagicMock(mongoconn=_mock_
 _mock_dotenv = MagicMock()
 sys.modules.setdefault("dotenv", _mock_dotenv)
 
+# Dummy Apify token so default-constructed actors pass the missing-token guard
+os.environ.setdefault("APIFI_API_TOKEN", "test-token")
+
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 
 

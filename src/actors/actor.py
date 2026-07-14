@@ -10,7 +10,18 @@ from typing import Any, Dict, List, Optional, Set
 from apify_client import ApifyClient
 from dotenv import load_dotenv
 
-APIFI_API_TOKEN = os.getenv("APIFI_API_TOKEN")
+load_dotenv()
+
+
+def _get_apify_token() -> str:
+    token = os.getenv("APIFI_API_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "APIFI_API_TOKEN is not set. Refusing to create an unauthenticated ApifyClient: "
+            "the Apify API rejects token-less run starts with a misleading "
+            "'x402 payment header missing' error. Load the repo .env before using actors."
+        )
+    return token
 
 # TODO: Replace file-based filter cache with Redis for multi-process/distributed support
 FILTER_CACHE_PATH = os.path.join("cache", "filter_cache.json")
@@ -60,7 +71,7 @@ class ApifyActor:
     actor_id: str = ""  # Apify actor ID, set by subclass
 
     def __init__(self, client: Optional[ApifyClient] = None):
-        self.client = client or ApifyClient(APIFI_API_TOKEN)
+        self.client = client or ApifyClient(_get_apify_token())
         self.search_params_keywords: List[str] = []  # Should be set by the actor subclass when the scraping is keyword or hashtag-based
         self._filter_cache: Dict[str, bool] = self._load_filter_cache()
         self.filtered_documents: List[Dict[str, Any]] = []

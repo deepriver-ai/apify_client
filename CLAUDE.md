@@ -96,6 +96,5 @@ Tests should be updated when schemas are changed, new Actors are implemented, or
 ## Development Notes
 
 - Python 3 with extensive type hints (`from __future__ import annotations`)
-- Python 3 with extensive type hints (`from __future__ import annotations`)
-- Environment config via `.env` (Apify token, service endpoints)
+- Environment config via `.env` (Apify token, service endpoints). `src/actors/actor.py` calls `load_dotenv()` at import (found by walking up from the module's directory, so it works regardless of caller cwd) and resolves `APIFI_API_TOKEN` lazily at `ApifyActor` construction — a missing token raises a clear `RuntimeError` instead of letting an unauthenticated client reach the Apify API (which fails with a misleading `x402 payment header missing` error).
 - MCP server configured in `.mcp.json` for Apify actor interaction
