@@ -110,6 +110,20 @@ class TestTikTokSearchInput:
         run_input = mock_run.call_args[0][0]
         assert "proxyCountryCode" not in run_input
 
+    def test_video_search_sorting_defaults_to_latest(self, actor, sample_tiktok_item):
+        with patch.object(actor, "run_actor", return_value=[sample_tiktok_item]) as mock_run:
+            with patch.object(actor, "process_documents", side_effect=lambda docs, **kwargs: docs):
+                actor.search(["valvoline"])
+
+        assert mock_run.call_args[0][0]["videoSearchSorting"] == "LATEST"
+
+    def test_video_search_sorting_is_overridable(self, actor, sample_tiktok_item):
+        with patch.object(actor, "run_actor", return_value=[sample_tiktok_item]) as mock_run:
+            with patch.object(actor, "process_documents", side_effect=lambda docs, **kwargs: docs):
+                actor.search(["valvoline"], videoSearchSorting="RELEVANCE")
+
+        assert mock_run.call_args[0][0]["videoSearchSorting"] == "RELEVANCE"
+
     def test_comments_and_actor_params_override_defaults(self, actor, sample_tiktok_item):
         with patch.object(actor, "run_actor", return_value=[sample_tiktok_item]) as mock_run:
             with patch.object(actor, "process_documents", side_effect=lambda docs, **kwargs: docs):

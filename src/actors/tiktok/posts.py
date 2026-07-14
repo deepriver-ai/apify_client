@@ -30,6 +30,7 @@ APIFY_INPUT_KEYS = {
     "shouldDownloadSlideshowImages",
     "shouldDownloadSubtitles",
     "shouldDownloadVideos",
+    "videoSearchSorting",
 }
 
 
@@ -66,6 +67,10 @@ class TikTokPostsActor(ApifyActor):
             "resultsPerPage": results_limit,
             "scrapeRelatedVideos": False,
             "searchSection": "/video",
+            # TikTok search is relevance-sorted by default; sorting by recency keeps
+            # paid results inside the task's date window (measured 2026-07-13: 84% of
+            # relevance-sorted items fell outside a 7-day period)
+            "videoSearchSorting": "LATEST",
             "shouldDownloadAvatars": False,
             "shouldDownloadCovers": False,
             "shouldDownloadMusicCovers": False,
