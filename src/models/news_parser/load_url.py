@@ -42,7 +42,22 @@ _HEADER_OPTIONS = [
 def _random_headers() -> dict:
     return random.choice(_HEADER_OPTIONS)
 
-REQUESTS_TIMEOUT = 15
+# Connecting to a live host is fast; a dead/unroutable host should fail quickly
+# rather than tie up an attempt. So we keep the *connect* timeout short and make
+# the *read* timeout generous — the read timeout is only an upper bound on how
+# long we wait between bytes, it does NOT slow down fast servers (they still
+# return in their natural time). Some legitimate origins behind slow CDNs
+# (e.g. oem.com.mx) have a time-to-first-byte of ~80s: a browser gets the page,
+# but the previous flat 15s cap killed attempts 1-2 and only a lucky retry
+# succeeded, costing ~2 min for a page that returns valid HTML in one attempt.
+#
+# The read timeout escalates per attempt so a transient stall gets a longer
+# grace period on retry, while the first attempt is already generous enough to
+# cover known slow-but-succeeding origins in a single request.
+CONNECT_TIMEOUT = 10
+READ_TIMEOUTS = (90, 120, 150)
+# Kept for backwards compatibility / external references.
+REQUESTS_TIMEOUT = READ_TIMEOUTS[0]
 MAX_RESP_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
@@ -53,8 +68,14 @@ def fetch_html(url: str, max_retries: int = 3) -> tuple[Optional[str], Optional[
     from the input when the original URL is shortened or redirected.
     """
     for attempt in range(max_retries):
+        read_timeout = READ_TIMEOUTS[min(attempt, len(READ_TIMEOUTS) - 1)]
         try:
-            r = requests.get(url, headers=_random_headers(), timeout=REQUESTS_TIMEOUT, stream=True)
+            r = requests.get(
+                url,
+                headers=_random_headers(),
+                timeout=(CONNECT_TIMEOUT, read_timeout),
+                stream=True,
+            )
             r.raise_for_status()
 
             if int(r.headers.get("Content-Length", 0)) > MAX_RESP_SIZE:
@@ -65,7 +86,9 @@ def fetch_html(url: str, max_retries: int = 3) -> tuple[Optional[str], Optional[
             size = 0
             start = time.time()
             for chunk in r.iter_content(1024):
-                if time.time() - start > REQUESTS_TIMEOUT:
+                # Cap total streaming time by the same per-attempt read budget so
+                # a server that trickles bytes forever can't hang the fetch.
+                if time.time() - start > read_timeout:
                     raise ValueError("Streaming timeout reached")
                 size += len(chunk)
                 if size > MAX_RESP_SIZE:

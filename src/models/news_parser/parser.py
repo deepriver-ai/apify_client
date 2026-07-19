@@ -20,6 +20,49 @@ _RELATED_LINK_MARKERS = (
 )
 _RELATED_LINK_THRESHOLD = 3
 
+# Section-label lines that repeat when a parser mistakes a related-content
+# block for the article body. On OEM (Organización Editorial Mexicana) pages the
+# extracted "body" is a stack of "SECTION\nHeadline\nDek" triples, e.g.
+# "LOCAL\nMejoraron movilidad...\nLOCAL\nResguardan a lomitos...". These labels
+# never appear as standalone lines inside a real article's prose, so 3+ of them
+# (counted as full lines) means we grabbed a navigation/related list, not the story.
+_SECTION_LABELS = frozenset(
+    {
+        "local",
+        "policiaca",
+        "policíaca",
+        "cultura",
+        "deportes",
+        "finanzas",
+        "nacional",
+        "internacional",
+        "mundo",
+        "republica",
+        "república",
+        "gossip",
+        "elecciones",
+        "espectaculos",
+        "espectáculos",
+        "tecnologia",
+        "tecnología",
+        "sociedad",
+        "economia",
+        "economía",
+        "estados",
+        "municipios",
+        "opinion",
+        "opinión",
+        "seguridad",
+        "salud",
+        "negocios",
+        "virales",
+    }
+)
+_SECTION_LABEL_THRESHOLD = 3
+# A short standalone line that repeats verbatim is a label/nav artifact, not prose.
+_REPEATED_LINE_MAX_LEN = 40
+_REPEATED_LINE_THRESHOLD = 3
+
 
 def extract_article(html: str, url: str) -> Optional[Dict[str, Any]]:
     """
@@ -192,6 +235,8 @@ def _has_meaningful_content(result: Dict[str, Any]) -> bool:
         return False
     if _looks_like_related_posts_list(body):
         return False
+    if _looks_like_section_label_list(body):
+        return False
     return True
 
 
@@ -202,6 +247,35 @@ def _looks_like_related_posts_list(body: str) -> bool:
     lowered = body.lower()
     hits = sum(lowered.count(marker) for marker in _RELATED_LINK_MARKERS)
     return hits >= _RELATED_LINK_THRESHOLD
+
+
+def _looks_like_section_label_list(body: str) -> bool:
+    """Detect a related-content list built from repeated section headers.
+
+    Catches the OEM variant that evades the "Ver más" heuristic: the body is a
+    stack of "SECTION\\nHeadline\\nDek" triples. Fires when either
+    (a) known section-label lines (LOCAL, POLICIACA, CULTURA, ...) appear as
+    standalone lines 3+ times, or (b) any short line repeats verbatim 3+ times
+    (a nav/label artifact). Both are structural signals — a real article merely
+    *mentioning* these words inline (e.g. "la policía local") is not affected,
+    because the words are not alone on their own line.
+    """
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    if not lines:
+        return False
+
+    section_line_hits = sum(1 for ln in lines if ln.lower() in _SECTION_LABELS)
+    if section_line_hits >= _SECTION_LABEL_THRESHOLD:
+        return True
+
+    counts: Dict[str, int] = {}
+    for ln in lines:
+        if len(ln) <= _REPEATED_LINE_MAX_LEN:
+            counts[ln] = counts.get(ln, 0) + 1
+    if counts and max(counts.values()) >= _REPEATED_LINE_THRESHOLD:
+        return True
+
+    return False
 
 
 def _field_ok(result: Dict[str, Any], field: str) -> bool:
