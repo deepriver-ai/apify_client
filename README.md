@@ -110,6 +110,95 @@ Keyed by `profile_url` (e.g. `https://www.instagram.com/username/`). Stores per-
 - `Post` class-level singleton `users_manager` provides access to all pipeline stages
 
 
+## SocialUsers — account characterization (WS-4)
+
+Per-account classification store + batch classifier that powers the report-time
+author-characterization layer. **Consumption is a read-time join**: reports look
+authors up in Mongo and attach the classification to the (immutable)
+Elasticsearch documents — the classifier never writes to ES. Design grounding:
+`reports/event_report/docs/social_report_design.md` §1;
+`business_agent/customers/sjdr/plan.md` WS-4.
+
+### Store (`src/models/social_users.py`)
+
+`SocialUsers` — CRUD over the `SocialUsers` Mongo collection, a sibling of
+`CrawlersAll` in the same database (`MONGO_DB_NEWS_SOURCES`, via
+`src/helpers/mongoconnection.py`). Test-injectable (`SocialUsers(collection=...)`).
+
+**Two-tier identity, one document per account:**
+
+- tier `"profile"` — post authors, keyed by a canonical, normalized
+  `profile_url` (scheme / `www.` / query / trailing slash stripped). Strong
+  identity (`identity_confidence` 0.9).
+- tier `"name"` — comment-only authors, keyed by `(network, normalized_name)`
+  where `normalize_name` casefolds, collapses whitespace and strips accents.
+  Best-effort identity — lower `identity_confidence` ceiling (0.5).
+
+Helpers: `normalize_name`, `normalize_profile_url`, `account_id(tier, ...)`
+(deterministic `_id`: `profile:<url>` / `name:<network>:<name>`),
+`build_record(...)` (assembles a normalized document).
+
+**Stored classes are the CLASSIFIER classes only**: `organico`, `pagina_oficial`,
+`politico`, `comunidad`, `sitio_local`, `sitio_estatal`, `sitio_nacional`. `bot`
+and `influencer` are deliberately **not** stored — they are derived at read time
+by the report builders from `automation_score` / `followers` against tunable
+per-market thresholds. Each record also carries `automation_score` (+
+`automation_evidence`), `anonymity`, `followers`, the deterministic `features`
+dict, an `evidence_sample` (≤5 verbatim texts), activity counters
+(`n_comments`/`n_posts`/`n_distinct_parent_docs`/`pages_touched`), and provenance
+(`classified_at`, `evidence_as_of`, `llm_model`, `classifier_version`).
+
+Reads: `get`, `get_by_profile_url`, `get_by_name` (degrade to `None` when Mongo is
+unreachable). Writes: `upsert(record)`; `needs_reclassification(record)` returns
+True only when evidence is materially newer than the stored `evidence_as_of`.
+
+### Classifier CLI (`src/scripts/classify_users.py`)
+
+```
+python -m src.scripts.classify_users \
+  --pages "Roberto Cabrera Valencia" "Presidencia Municipal San Juan del Río" \
+  [--networks facebook tiktok] [--days 60] \
+  [--org 101 --entities 82 83] [--min-activity 2] \
+  [--official-pages "Presidencia Municipal San Juan del Río"] [--apply]
+```
+
+Default is a **dry run**: prints a human-review table (account, tier, class,
+automation_score, appearances, top evidence — sorted by automation desc) and
+writes a JSON report to `cache/runs/`. It writes to Mongo **only** with `--apply`.
+
+Stages:
+
+1. **A — harvest (ES `news`):** posts where `source.name ∈ --pages` within
+   `--days` (optional `news_type ∈ --networks`). Collects post authors
+   (`source.stats.profile_url` / `author_full_name` / `website_visits` /
+   `author_profile_bio`; falls back to name-tier on `source.name` when no
+   `profile_url`) and every comment author from the top-level `comments` array.
+2. **B — deterministic features (no LLM):** activity counters; text repetition
+   (`max_duplicate_text_count`, `mean_pairwise_similarity` via `difflib` on a
+   capped comment sample — no embeddings); like stats; burstiness (comments on
+   different posts within a short window); name-shape anonymity signals.
+   `automation_score` is computed deterministically here (copy-paste repetition
+   saturates it).
+3. **Optional sentiment join (userdb):** with `--org`/`--entities` and
+   `DATABASE_URI`, matches `entities_documents_sentiments_org` comment rows to
+   harvested comments by `(parent_doc_id, timestamp-to-the-minute)` and folds
+   per-account extremity share + dominant polarity into features. Degrades
+   gracefully when the DB/env is absent.
+4. **C — classification (cost-gated):** deterministic bypasses first
+   (`--official-pages` → `pagina_oficial`; known `SourcesManagement` domain →
+   `sitio_*` by geography), **no LLM call**. Only accounts with
+   `appearances >= --min-activity` and no deterministic class go to the LLM
+   (batched via `src/oai/llm_core.py`'s cached wrapper; strict JSON parse with an
+   organico/low-confidence fallback). Bump `CLASSIFIER_VERSION` to invalidate the
+   cache after prompt/feature changes.
+5. **D — output:** review table + JSON report always; `--apply` upserts into
+   `SocialUsers`.
+
+**Environment** (read from the process env / repo `.env`): `ELASTIC_HOST`,
+`ELASTIC_PORT`, `ELASTIC_AUTH` (https, `verify_certs=False`); `DATABASE_URI`
+(sentiment join only); `OPENROUTER_API_KEY` (LLM); `MONGO_*` (for `--apply`).
+
+
 # Intermediate schema
 
 All data fetched from Apify is first translated into this common intermediate schema before final normalization:
@@ -432,6 +521,8 @@ python -m pytest src/tests/ -v
 | `test_social_enrichment.py` | Social enrichment: URL extraction, fetch_attached_url (article text append, location copy, no-overwrite), platform-specific NotImplementedError stubs |
 | `test_llm_filter.py` | LLM filtering: snippet building (keyword context vs first chars), batching, cache integration, override_filters, per-task filter cache, per-document `(url, condition, snippet_max_len)` decision cache (reuse, snippet-len separation, override re-evaluation, url-less always-sent) |
 | `test_users_management.py` | UsersManagement: save/get stats and location, needs_stats_update staleness, persistence to disk |
+| `test_social_users.py` | SocialUsers store + two-tier identity: name/profile-url normalization, deterministic `account_id`, `build_record` (identity/confidence per tier, stored-class coercion, evidence cap), upsert/get (Mongo mocked), `needs_reclassification` staleness |
+| `test_classify_users.py` | Classifier: repetition/similarity features (Carlos-Martinez-style duplicate text scores max; varied complainers score low), burstiness, min-activity gate (singletons never call the LLM), deterministic official/outlet-domain bypass, sentiment join by `(parent_doc_id, minute)`, review-table ordering (ES/Mongo/LLM mocked) |
 | `test_schema.py` | NEWS_SCHEMA normalization: comments list, empty list, None handling, expected fields |
 
 ## Test data
@@ -442,6 +533,6 @@ Cache fixtures in `src/tests/cache/` are generated by running actual Apify calls
 # TODO
 
 - **`SourcesManagement` Mongo create/update** — `SourcesManagement` currently reads sources from MongoDB via `src/helpers/sources.py` but has no ability to create or update source records in Mongo. Add methods to create new sources and update existing ones directly through `SourcesManagement`, so that unknown sources can be promoted to known sources without manual DB intervention.
-- **`UsersManagement` MongoDB backing** — `UsersManagement` is currently file-based (`cache/users.json`). Add a MongoDB collection (sibling of `admin_app.CrawlersAll`) for persistent, shared storage across instances. Context from the SJdR discovery run (2026-07-13): profile enrichment is the dominant cost of a keyword-search crawl — one FB run paid ~$0.45 for ~200 posts but ~$1.03 for enriching ~98 author pages — and the cache is what amortizes it (cached stats always apply; only unknown/stale profiles are re-scraped, `stats_max_age_days=90`). File-based, that amortization is lost across machines/deployments and can't be shared by the queue-worker deployment planned for on-demand tasks; it's also where the planned author `classification` fields (orgánico/bot/página oficial/sitio local-estatal-nacional) need to live so a batch classifier and the publish pipeline can read them. See `business_agent/customers/sjdr/plan.md` WS-4 for the full design (classifier, message schema, gp3 passthrough → ES).
+- **`UsersManagement` MongoDB backing** — `UsersManagement` is currently file-based (`cache/users.json`). Add a MongoDB collection (sibling of `admin_app.CrawlersAll`) for persistent, shared storage across instances. Context from the SJdR discovery run (2026-07-13): profile enrichment is the dominant cost of a keyword-search crawl — one FB run paid ~$0.45 for ~200 posts but ~$1.03 for enriching ~98 author pages — and the cache is what amortizes it (cached stats always apply; only unknown/stale profiles are re-scraped, `stats_max_age_days=90`). File-based, that amortization is lost across machines/deployments and can't be shared by the queue-worker deployment planned for on-demand tasks; it's also where the planned author `classification` fields (orgánico/bot/página oficial/sitio local-estatal-nacional) need to live so a batch classifier and the publish pipeline can read them. See `business_agent/customers/sjdr/plan.md` WS-4 for the full design (classifier, message schema, gp3 passthrough → ES). **Partly landed (2026-07-20):** the per-account **classification** store is now `src/models/social_users.py` (`SocialUsers` Mongo collection) fed by the `src/scripts/classify_users.py` batch classifier, consumed by reports via a **read-time join** (no ES write). Still open on the WS-4 seam: promoting the `UsersManagement` follower/bio cache itself into Mongo, and the transport/gp3/ES-field passthrough (only needed if characterization is ever pushed onto ES docs rather than joined at read time).
 - **Redis filter cache** — Replace the file-based filter cache (`cache/filter_cache.json`) with Redis for multi-process/distributed support.
 - **Platform enrichment stubs** — Implement `download_images`, `download_video`, `add_text_from_images` (Instagram), `add_subtitles`, `add_ai_transcription` for each social platform via platform-specific Apify actors.
