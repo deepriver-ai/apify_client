@@ -374,3 +374,16 @@ def test_upsert_narrow_scope_does_not_shrink_history():
     assert "classification" not in setdoc          # features/class preserved
     assert setdoc["pages_touched"] == ["Pagina A", "Pagina B"]
     assert setdoc["evidence_as_of"] == "2026-07-21"
+
+
+def test_systematic_rule_catches_high_volume_low_coverage_critic():
+    """JACU profile: 21 comments official-only, per-page coverage ~0.25,
+    sarcasm-diluted extremity (0.52) — must flag under the n>=10 arm."""
+    from src.scripts.classify_users import compute_automation
+    feats = {"n_comments": 21, "official_pages_only": True,
+             "official_page_coverage": 0.25, "comments_per_active_day": 1.05,
+             "extremity_share": 0.52, "dominant_polarity": "negativo",
+             "max_duplicate_text_count": 1, "mean_pairwise_similarity": 0.1,
+             "burst_count": 0, "burst_share": 0.0}
+    score, ev = compute_automation(feats)
+    assert score >= 0.7

@@ -368,8 +368,12 @@ def compute_features(acc: Account, official_pages: Optional[List[str]] = None,
         # flagging an unusually devoted citizen over missing an LLM-era bot).
         "official_pages_only": bool(acc.pages) and bool(official_pages)
             and acc.pages <= set(official_pages),
-        "official_page_coverage": round(
-            len(acc.parent_docs) / max(1, sum(page_post_counts.get(p, 0) for p in acc.pages)), 3)
+        # MAX per-page ratio: an account tracking one page must not be diluted
+        # by the other official pages' volume.
+        "official_page_coverage": round(max(
+            (sum(1 for c in acc.comment_items if c.get("page") == p) /
+             max(1, page_post_counts.get(p, 1)))
+            for p in acc.pages), 3)
             if acc.pages and page_post_counts and official_pages
                and acc.pages <= set(official_pages) else 0.0,
         "comments_per_active_day": _comments_per_active_day(acc),
@@ -419,9 +423,12 @@ def compute_automation(features: Dict[str, Any]) -> Tuple[float, List[str]]:
     # and we prefer flagging a devoted citizen over missing a bot.
     n = features.get("n_comments", 0)
     cov = features.get("official_page_coverage", 0.0)
-    pol_consistent = features.get("extremity_share", 0.0) >= 0.9 and \
-        features.get("dominant_polarity") in ("negativo", "positivo")
-    if (features.get("official_pages_only") and n >= 5 and cov >= 0.4 and pol_consistent):
+    # dominant polarity carries the gate; strict extremity misses sarcasm
+    # (LLM sentiment reads it as neutral).
+    pol_consistent = features.get("dominant_polarity") in ("negativo", "positivo") and (
+        features.get("extremity_share", 0.0) >= 0.5)
+    if (features.get("official_pages_only") and
+            ((n >= 5 and cov >= 0.4) or (n >= 10 and cov >= 0.22)) and pol_consistent):
         score = max(score, min(1.0, 0.6 + cov / 2))
         evidence.append(
             f"contramensaje sistemático: {n} comentarios solo en páginas oficiales, "
@@ -674,6 +681,11 @@ def _validate_llm_result(raw: Dict[str, Any], acc: Account) -> None:
     acc.confidence = _clamp01(raw.get("confidence", 0.0))
     acc.anonymity = _clamp01(raw.get("anonymity", 0.0))
     llm_auto = _clamp01(raw.get("automation_score", 0.0))
+    # The LLM alone must not mint mid-band scores: without deterministic
+    # evidence and with thin activity, diffuse suspicion capped below the
+    # observation band (72 accounts landed at 0.5 on vibes, 2026-07-21).
+    if (not acc.automation_evidence) and acc.appearances < 5:
+        llm_auto = min(llm_auto, 0.45)
     # Automation score: max of deterministic and LLM (repetition is ground truth).
     acc.automation_score = round(max(acc.automation_score, llm_auto), 3)
     ev = raw.get("evidence") or []
