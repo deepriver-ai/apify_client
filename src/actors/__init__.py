@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.actors.actor import ApifyActor
 from src.actors.facebook.keyword_search import FacebookKeywordSearchActor
+from src.actors.facebook.post_comments import FacebookPostCommentsActor
 from src.actors.facebook.posts import FacebookPagePostsActor
 from src.actors.instagram.hashtags import InstagramHashtagActor
 from src.actors.instagram.profile_posts import InstagramProfilePostsActor
@@ -17,6 +18,7 @@ ACTOR_REGISTRY = {
     "instagram_profile_posts": InstagramProfilePostsActor,
     "instagram_profile_queenlike": InstagramProfileQueenlikeActor,
     "facebook_page_posts": FacebookPagePostsActor,
+    "facebook_post_comments": FacebookPostCommentsActor,
     "facebook_keyword_search": FacebookKeywordSearchActor,
     "twitter_keyword_search": TwitterKeywordSearchActor,
     "linkedin_keyword_search": LinkedInKeywordSearchActor,

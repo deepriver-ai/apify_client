@@ -386,6 +386,10 @@ Maps string keys to actor classes:
 | `instagram_profile_posts` | `InstagramProfilePostsActor` |
 | `instagram_profile_queenlike` | `InstagramProfileQueenlikeActor` |
 | `facebook_page_posts` | `FacebookPagePostsActor` |
+| `facebook_post_comments` | `FacebookPostCommentsActor` (comments-on-demand for individual post URLs) |
+| `facebook_keyword_search` | `FacebookKeywordSearchActor` |
+| `twitter_keyword_search` | `TwitterKeywordSearchActor` |
+| `linkedin_keyword_search` | `LinkedInKeywordSearchActor` |
 | `tiktok_posts` | `TikTokPostsActor` |
 
 
