@@ -25,13 +25,17 @@ from src.models.news_parser.load_url import (
     fetch_html,
 )
 from src.models.news_parser.parser import (
+    _extract_oem,
     _has_meaningful_content,
     _looks_like_section_label_list,
+    _try_domain_extractor,
+    _try_jsonld,
     extract_article,
 )
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 OEM_FIXTURE = os.path.join(CACHE_DIR, "oem_related_content_sample.html")
+OEM_FLIGHT_FIXTURE = os.path.join(CACHE_DIR, "oem_flight_stream_sample.html")
 OEM_URL = (
     "https://oem.com.mx/elsoldesanjuandelrio/local/"
     "ciudadania-tendra-que-defender-programas-hidricos-tono-perez-31157721"
@@ -189,3 +193,188 @@ class TestFetchTimeouts:
         resp.headers = {"Content-Length": str(load_url.MAX_RESP_SIZE + 1)}
         with patch.object(load_url.requests, "get", return_value=resp):
             assert fetch_html("https://big.example") == (None, None)
+
+
+# --------------------------------------------------------------------------- #
+# Tier 1 — generic JSON-LD articleBody extraction
+# --------------------------------------------------------------------------- #
+def _ld_html(node_json: str, body_html: str = "") -> str:
+    return (
+        "<!doctype html><html><head>"
+        f'<script type="application/ld+json">{node_json}</script>'
+        f"</head><body>{body_html}</body></html>"
+    )
+
+
+_GOOD_BODY = (
+    "El ayuntamiento aprobó este miércoles el presupuesto para el próximo año "
+    "fiscal, que contempla una inversión histórica en infraestructura hídrica y "
+    "en programas sociales para las comunidades rurales del municipio. "
+    "El alcalde detalló que los recursos permitirán rehabilitar la red de agua "
+    "potable y ampliar la cobertura del servicio en las zonas más alejadas."
+)
+
+
+class TestJsonLdTier:
+    def test_articlebody_accepted(self):
+        node = (
+            '{"@context":"https://schema.org","@type":"NewsArticle",'
+            '"headline":"Aprueban presupuesto histórico",'
+            '"author":{"@type":"Person","name":"Ana Ramírez"},'
+            '"datePublished":"2026-07-15T09:00:00",'
+            '"image":{"@type":"ImageObject","url":"https://x/img.jpg"},'
+            f'"articleBody":{__import__("json").dumps(_GOOD_BODY)}' + "}"
+        )
+        result = _try_jsonld(_ld_html(node), "https://example.com/nota")
+        assert result is not None
+        assert result["body"] == _GOOD_BODY
+        assert result["title"] == "Aprueban presupuesto histórico"
+        assert result["author"] == "Ana Ramírez"
+        assert result["timestamp"] == "2026-07-15T09:00:00"
+        assert result["media_urls"] == ["https://x/img.jpg"]
+
+    def test_graph_nesting_accepted(self):
+        node = (
+            '{"@context":"https://schema.org","@graph":['
+            '{"@type":"WebSite","name":"Site"},'
+            '{"@type":"ReportageNewsArticle","headline":"Titular",'
+            f'"articleBody":{__import__("json").dumps(_GOOD_BODY)}' + "}]}"
+        )
+        result = _try_jsonld(_ld_html(node), "https://example.com/nota")
+        assert result is not None
+        assert result["body"] == _GOOD_BODY
+        assert result["title"] == "Titular"
+
+    def test_no_articlebody_falls_through(self):
+        node = (
+            '{"@context":"https://schema.org","@type":"NewsArticle",'
+            '"headline":"Sin cuerpo","wordCount":498}'
+        )
+        assert _try_jsonld(_ld_html(node), "https://example.com/nota") is None
+
+    def test_short_articlebody_rejected(self):
+        node = (
+            '{"@context":"https://schema.org","@type":"NewsArticle",'
+            '"headline":"Corto","articleBody":"Muy corto."}'
+        )
+        assert _try_jsonld(_ld_html(node), "https://example.com/nota") is None
+
+    def test_non_article_type_ignored(self):
+        node = (
+            '{"@context":"https://schema.org","@type":"WebPage",'
+            f'"articleBody":{__import__("json").dumps(_GOOD_BODY)}' + "}"
+        )
+        assert _try_jsonld(_ld_html(node), "https://example.com/nota") is None
+
+    def test_malformed_jsonld_falls_through(self):
+        assert _try_jsonld(_ld_html("{not valid json"), "https://x/y") is None
+
+
+# --------------------------------------------------------------------------- #
+# Tier 2 — OEM Next.js RSC flight-stream extractor
+# --------------------------------------------------------------------------- #
+class TestOemFlightStreamTier:
+    def _load(self):
+        with open(OEM_FLIGHT_FIXTURE, encoding="utf-8") as f:
+            return f.read()
+
+    def test_extracts_body_from_flight_stream(self):
+        html = self._load()
+        result = _extract_oem(html, OEM_URL)
+        assert result is not None
+        assert "más de 10 millones de pesos" in result["body"]
+        assert "sociedad organizada está obligada" in result["body"]
+
+    def test_encoding_is_not_mojibaked(self):
+        html = self._load()
+        body = _extract_oem(html, OEM_URL)["body"]
+        # Accented text must be decoded correctly, not "aÃ±o"/"estÃ¡".
+        assert "año" in body
+        assert "está" in body
+        assert "Ã" not in body
+
+    def test_excludes_newsletter_and_author_bio(self):
+        html = self._load()
+        body = _extract_oem(html, OEM_URL)["body"]
+        assert "Suscríbete" not in body
+        assert "newsletter" not in body.lower()
+        # Author-bio card carries a different publishedAt and is dropped.
+        assert "Reportero de a pie" not in body
+
+    def test_metadata_from_jsonld(self):
+        html = self._load()
+        result = _extract_oem(html, OEM_URL)
+        assert result["title"] == "Ciudadanía defenderá los programas hídricos"
+        assert result["author"] == "Mario Luna"
+        assert result["timestamp"] == "2026-07-18T10:29:48"
+        assert result["media_urls"] == ["https://oem.com.mx/img/hero.jpg"]
+
+    def test_malformed_flight_stream_returns_none(self):
+        # No storyline paragraphs -> None so the cascade continues unchanged.
+        html = (
+            "<html><body>"
+            '<script>self.__next_f.push([1,"5:[\\"$\\",\\"div\\",null,{}]"])</script>'
+            "</body></html>"
+        )
+        assert _extract_oem(html, OEM_URL) is None
+
+    def test_no_flight_stream_returns_none(self):
+        html = "<html><body><p>plain page</p></body></html>"
+        assert _extract_oem(html, OEM_URL) is None
+
+
+# --------------------------------------------------------------------------- #
+# Cascade order — JSON-LD > domain > NewsPlease; failures fall through cleanly
+# --------------------------------------------------------------------------- #
+class TestCascadeOrder:
+    def test_jsonld_wins_over_domain(self):
+        # An oem.com.mx page that ALSO ships an articleBody: the generic JSON-LD
+        # tier must win before the domain extractor is ever consulted.
+        node = (
+            '{"@context":"https://schema.org","@type":"NewsArticle",'
+            '"headline":"Con cuerpo","author":{"@type":"Person","name":"X"},'
+            f'"articleBody":{__import__("json").dumps(_GOOD_BODY)}' + "}"
+        )
+        html = _ld_html(node)
+        with patch(
+            "src.models.news_parser.parser._parse_with_llm"
+        ) as mock_llm, patch(
+            "src.models.news_parser.parser._extract_oem"
+        ) as mock_oem:
+            result = extract_article(html, OEM_URL)
+        assert result["body"] == _GOOD_BODY
+        assert not mock_oem.called
+        assert not mock_llm.called
+
+    def test_domain_wins_over_newsplease_and_llm(self):
+        with open(OEM_FLIGHT_FIXTURE, encoding="utf-8") as f:
+            html = f.read()
+        with patch(
+            "src.models.news_parser.parser._parse_with_llm"
+        ) as mock_llm, patch(
+            "src.models.news_parser.parser._try_newsplease"
+        ) as mock_np:
+            result = extract_article(html, OEM_URL)
+        assert "más de 10 millones de pesos" in result["body"]
+        assert not mock_llm.called
+        # Domain tier returned before NewsPlease was even tried.
+        assert not mock_np.called
+
+    def test_generic_jsonld_beats_newsplease_for_any_domain(self):
+        node = (
+            '{"@context":"https://schema.org","@type":"Article",'
+            '"headline":"Nota","author":{"@type":"Person","name":"Y"},'
+            f'"articleBody":{__import__("json").dumps(_GOOD_BODY)}' + "}"
+        )
+        html = _ld_html(node, "<article><p>irrelevant dom</p></article>")
+        with patch(
+            "src.models.news_parser.parser._try_newsplease"
+        ) as mock_np, patch("src.models.news_parser.parser._parse_with_llm") as mock_llm:
+            result = extract_article(html, "https://someoutlet.com/nota-123")
+        assert result["body"] == _GOOD_BODY
+        assert not mock_np.called
+        assert not mock_llm.called
+
+    def test_non_registered_domain_has_no_extractor(self):
+        html = "<html><body><p>x</p></body></html>"
+        assert _try_domain_extractor(html, "https://not-oem.com/x") is None
