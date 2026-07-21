@@ -314,6 +314,8 @@ class InstagramProfilePostsActor(ApifyActor):
                 comments_by_url[post_url].append({
                     "comment_text": c.get("text"),
                     "comment_author": c.get("ownerUsername"),
+                    "comment_author_url": (f"https://www.instagram.com/{c['ownerUsername']}/"
+                                           if c.get("ownerUsername") else None),
                     "comment_timestamp": c.get("timestamp"),
                     "comment_likes": c.get("likesCount"),
                 })

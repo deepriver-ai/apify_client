@@ -172,6 +172,8 @@ class LinkedInKeywordSearchActor(ApifyActor):
                 mapped.append({
                     "comment_text": c.get("text") or c.get("content"),
                     "comment_author": (c.get("author") or {}).get("name"),
+                    "comment_author_url": (c.get("author") or {}).get("linkedinUrl")
+                        or (c.get("author") or {}).get("profileUrl"),
                     "comment_timestamp": c.get("postedAt") or c.get("createdAt"),
                     "comment_likes": c.get("likesCount") or c.get("numLikes"),
                 })

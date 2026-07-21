@@ -67,6 +67,7 @@ class FacebookCommentsActor:
         return {
             "comment_text": raw.get("text"),
             "comment_author": raw.get("profileName"),
+            "comment_author_url": raw.get("profileUrl"),
             "comment_timestamp": raw.get("date"),
             "comment_likes": raw.get("likesCount"),
         }

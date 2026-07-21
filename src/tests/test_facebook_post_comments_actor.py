@@ -77,6 +77,7 @@ class TestSearchBuildsDocs:
         assert set(c.keys()) == {
             "comment_text",
             "comment_author",
+            "comment_author_url",
             "comment_timestamp",
             "comment_likes",
         }

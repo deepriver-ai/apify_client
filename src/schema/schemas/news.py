@@ -96,6 +96,10 @@ NEWS_SCHEMA: Dict[str, Dict[str, Any]] = {
 COMMENT_SCHEMA: Dict[str, Dict[str, Any]] = {
     "comment_text":      {"type": str},
     "comment_author":    {"type": str},
+    # Commenter's profile URL (2026-07-21, WS-4 profile gap): scrapers return
+    # it but it was dropped at mapping — it upgrades comment authors from
+    # name-tier to profile-tier identity and unblocks profile enrichment.
+    "comment_author_url": {"type": str},
     "comment_timestamp": {"type": datetime},
     "comment_likes":     {"type": int},
     "comment_id":        {"type": str, "default": default_comment_id},

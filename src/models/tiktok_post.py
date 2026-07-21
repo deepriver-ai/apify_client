@@ -123,6 +123,10 @@ def _map_tiktok_comments(comments: Any) -> List[Dict[str, Any]]:
                 or comment.get("uid")
                 or comment.get("author")
             ),
+            "comment_author_url": (
+                f"https://www.tiktok.com/@{author['uniqueId']}"
+                if author.get("uniqueId") else None
+            ),
             "comment_timestamp": comment.get("createTimeISO") or comment.get("createTime") or comment.get("timestamp"),
             "comment_likes": comment.get("diggCount") or comment.get("likes") or comment.get("likeCount"),
         })
