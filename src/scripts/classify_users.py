@@ -184,16 +184,30 @@ def _upsert_comment_account(accounts: Dict[str, Account], author: str,
     return acc
 
 
-def harvest_evidence(es, pages: List[str], networks: Optional[List[str]],
-                     days: int, index: str = "news") -> Dict[str, Account]:
-    """Stage A. Scan ES for posts on ``pages`` in the last ``days`` and collect
+def harvest_evidence(es, pages: Optional[List[str]], networks: Optional[List[str]],
+                     days: int, index: str = "news",
+                     phrases: Optional[List[str]] = None) -> Dict[str, Account]:
+    """Stage A. Scan ES for docs in scope over the last ``days`` and collect
     both post authors and every comment author into an accounts dict keyed by the
-    deterministic SocialUsers id."""
+    deterministic SocialUsers id.
+
+    Scope is pages OR phrases (either or both; at least one required):
+    ``pages`` matches ``source.name`` (page-post crawls, where source carries the
+    page name); ``phrases`` matches text/title (keyword-search content, where
+    source.name is each author's OWN page and a page list can't capture it)."""
     from elasticsearch.helpers import scan
 
+    if not pages and not phrases:
+        raise ValueError("harvest_evidence needs pages and/or phrases")
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    scope: List[Dict[str, Any]] = []
+    if pages:
+        scope.append({"terms": {"source.name": pages}})
+    for ph in phrases or []:
+        scope.append({"match_phrase": {"text": ph}})
+        scope.append({"match_phrase": {"title": ph}})
     filters: List[Dict[str, Any]] = [
-        {"terms": {"source.name": pages}},
+        {"bool": {"should": scope, "minimum_should_match": 1}},
         {"range": {"date_created": {"gte": since}}},
     ]
     if networks:
@@ -735,7 +749,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
 
     es = get_es_client()
     logger.info("Stage A: harvesting evidence from ES ...")
-    accounts = harvest_evidence(es, args.pages, args.networks, args.days)
+    if not args.pages and not args.phrases:
+        raise SystemExit("give --pages and/or --phrases")
+    accounts = harvest_evidence(es, args.pages, args.networks, args.days,
+                                phrases=args.phrases)
     logger.info("Harvested %d accounts", len(accounts))
 
     logger.info("Stage B: computing deterministic features ...")
@@ -796,7 +813,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Batch social-account classifier (WS-4).")
-    p.add_argument("--pages", nargs="+", required=True, help="source.name values to harvest")
+    p.add_argument("--pages", nargs="*", default=None, help="source.name values to harvest")
+    p.add_argument("--phrases", nargs="*", default=None,
+                   help="match_phrase scope over text/title — captures keyword-search "
+                        "content whose source.name is the author's own page")
     p.add_argument("--networks", nargs="*", default=None, help="restrict to news_type values")
     p.add_argument("--days", type=int, default=60, help="lookback window in days")
     p.add_argument("--org", type=int, default=None, help="org_id for the sentiment join")

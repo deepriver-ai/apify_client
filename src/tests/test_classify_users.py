@@ -305,3 +305,26 @@ def test_same_post_duplicate_comments_are_scrape_artifacts():
     acc = [a for a in accounts.values() if a.display_name == "Enrique Ochoas"][0]
     assert acc.n_comments == 1
     assert len(acc.comment_items) == 1
+
+
+def test_phrases_scope_builds_match_phrase_should_clauses():
+    """--phrases must scope by text/title phrase match (keyword-search content
+    carries the author's own page in source.name, so page lists can't reach it)."""
+    from unittest.mock import patch
+    from src.scripts import classify_users as cu
+
+    captured = {}
+    def fake_scan(es, index, query, _source, size):
+        captured.update(query)
+        return []
+    with patch.object(cu, "get_es_client"), \
+         patch("elasticsearch.helpers.scan", side_effect=fake_scan):
+        cu.harvest_evidence(None, None, None, 7, phrases=["roberto cabrera"])
+    scope = captured["query"]["bool"]["filter"][0]["bool"]
+    assert scope["minimum_should_match"] == 1
+    fields = [list(c["match_phrase"].keys())[0] for c in scope["should"]]
+    assert sorted(fields) == ["text", "title"]
+
+    import pytest
+    with pytest.raises(ValueError):
+        cu.harvest_evidence(None, None, None, 7)
