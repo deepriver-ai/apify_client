@@ -81,3 +81,40 @@ class TestNewsSchemaComments:
         assert "comments" in result
         assert "url" in result
         assert "media_urls" in result
+
+
+def test_serialize_message_emits_iso_t_datetimes():
+    """Wire contract: datetimes serialize ISO-8601 with the T separator —
+    the space form (str(datetime)) breaks ES date parsing downstream and
+    poison-loops gp3's engagement merge (2026-07-21 incident)."""
+    import json
+    from datetime import datetime, timezone
+    from src.helpers.serialization import serialize_message
+
+    payload = {"message": {
+        "timestamp": datetime(2026, 7, 20, 17, 50, 17, tzinfo=timezone.utc),
+        "comments": [{"comment_timestamp": datetime(2026, 7, 21, 4, 22, 6, tzinfo=timezone.utc)}],
+    }}
+    wire = serialize_message(payload)
+    data = json.loads(wire)
+    assert data["message"]["timestamp"] == "2026-07-20T17:50:17+00:00"
+    assert data["message"]["comments"][0]["comment_timestamp"] == "2026-07-21T04:22:06+00:00"
+    assert " 17:50:17" not in wire and " 04:22:06" not in wire
+
+
+def test_publish_document_uses_canonical_serializer():
+    from unittest.mock import MagicMock, patch
+    from datetime import datetime, timezone
+    import sys
+    from src.helpers import serialization as sz
+
+    doc = MagicMock()
+    doc.to_final_schema.return_value = {"type": "news", "message": {
+        "timestamp": datetime(2026, 7, 20, 23, 17, 44, tzinfo=timezone.utc)}}
+    # helpers.rabbitmq connects at import — stub the module (import-safety is
+    # the reason publish_document lives in serialization.py)
+    fake_rb = MagicMock()
+    with patch.dict(sys.modules, {"src.helpers.rabbitmq": fake_rb}):
+        sz.publish_document(doc)
+    body = fake_rb.publish.call_args[0][0]
+    assert "2026-07-20T23:17:44+00:00" in body

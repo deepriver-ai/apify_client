@@ -98,3 +98,4 @@ def close_client():
     except Exception as e:
         raise e
 
+

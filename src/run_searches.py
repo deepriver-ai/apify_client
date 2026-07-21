@@ -11,7 +11,8 @@ from datetime import datetime
 from pika.exceptions import AMQPError
 
 from src.actors import get_actor
-from src.helpers.rabbitmq import close_client, publish
+from src.helpers.rabbitmq import close_client
+from src.helpers.serialization import publish_document
 from src.models.crawl_task import CrawlTask, load_tasks
 
 logger = logging.getLogger(__name__)
@@ -69,8 +70,7 @@ if __name__ == "__main__":
             if task.publish:
                 for doc in expanded:
                     try:
-                        final = doc.to_final_schema()
-                        publish(json.dumps(final, default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o)))
+                        publish_document(doc)
                     except AMQPError:
                         raise
                     except Exception as e:
