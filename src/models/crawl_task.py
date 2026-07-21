@@ -35,6 +35,12 @@ class CrawlTask:
     update_existing: bool = False
     enrich_followers: bool = False
     fetch_attached_url: bool = False
+    # Post-run user classification (WS-4): opt-in per task — this task's scope
+    # (page name for page tasks, search_params as phrases for keyword tasks)
+    # feeds the theme's classify_users pass. official_page marks page tasks whose
+    # account belongs to the customer (deterministic pagina_oficial bypass).
+    classify_users: bool = False
+    official_page: bool = False
     theme: str | None = None
     actor_params: Dict[str, Any] = field(default_factory=dict)
 
@@ -102,6 +108,8 @@ class CrawlTask:
             update_existing=parse_bool(row.get("update_existing", ""), default=False),
             enrich_followers=parse_bool(row.get("enrich_followers", ""), default=False),
             fetch_attached_url=parse_bool(row.get("fetch_attached_url", ""), default=False),
+            classify_users=parse_bool(row.get("classify_users", ""), default=False),
+            official_page=parse_bool(row.get("official_page", ""), default=False),
             theme=row.get("theme", "").strip().lower() or None,
             actor_params=actor_params,
         )

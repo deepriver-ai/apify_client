@@ -203,3 +203,19 @@ class TestTaskIdParsing:
         task = CrawlTask.from_csv_row(_make_row(task_id="t1"))
         kwargs = task.to_actor_kwargs()
         assert kwargs["task_id"] == "t1"
+
+
+def test_classify_users_and_official_page_flags():
+    """WS-4 opt-in: both default False; parsed truthy from the row."""
+    from src.models.crawl_task import CrawlTask
+
+    base = {"task_id": "1", "actor_class": "facebook_page_posts",
+            "search_params": "https://www.facebook.com/x", "enabled": "true"}
+    t = CrawlTask.from_csv_row(dict(base))
+    assert t.classify_users is False and t.official_page is False
+
+    t = CrawlTask.from_csv_row(dict(base, classify_users="TRUE", official_page="1"))
+    assert t.classify_users is True and t.official_page is True
+    # not actor params — must not leak into actor kwargs
+    kw = t.to_actor_kwargs()
+    assert "classify_users" not in kw and "official_page" not in kw

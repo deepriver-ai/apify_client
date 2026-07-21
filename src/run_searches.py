@@ -23,11 +23,13 @@ DEFAULT_TASKS_CSV = "tasks.xlsx"
 CURRENT_THEME = "chepe_guerrero"
 CURRENT_THEME = "efren_cuevas"
 CURRENT_THEME = "mc"
+CURRENT_THEME = "zona_fest"
+CURRENT_THEME = "sjdr"
 
 # Global override: when True, dismiss the cached filtered-out documents for every
 # task (all actors), re-running all filters from scratch regardless of each task's
 # own `override_filters` value. Equivalent to forcing override_filters=True everywhere.
-OVERRIDE_FILTERED_CACHE = True
+OVERRIDE_FILTERED_CACHE = False
 
 
 if __name__ == "__main__":
@@ -42,8 +44,9 @@ if __name__ == "__main__":
         tasks = [t for t in tasks if t.theme == CURRENT_THEME]
         logger.info("Filtered to %d tasks with theme=%s", len(tasks), CURRENT_THEME)
 
+    all_actors = []
     all_documents = []
-    for task in reversed(tasks):
+    for task in tasks:
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
             actor = get_actor(task.actor_class)
@@ -53,6 +56,7 @@ if __name__ == "__main__":
             documents = actor.search(task.search_params, **kwargs)
             logger.info("Got %d documents from %s (post-filter)", len(documents), task.actor_class)
 
+            all_actors.append(actor)
             # Expand each document into itself + its attached_news (if any),
             # so linked articles attached to social posts are also published/saved.
             expanded = []
@@ -102,3 +106,43 @@ if __name__ == "__main__":
     close_client()
     logger.info("All tasks complete")
 
+    # --- Post-run user classification (WS-4, opt-in per task) ----------------
+    # Tasks flagged classify_users contribute scope: page tasks their page's
+    # source name (read from the docs this run just produced, matched by profile
+    # URL slug), keyword tasks their search_params as phrases. official_page
+    # tasks feed the deterministic pagina_oficial bypass. One aggregated pass
+    # per run, --apply semantics. Failure never affects the crawl results.
+    flagged = [t for t in tasks if getattr(t, "classify_users", False)]
+    if flagged:
+        import argparse as _argparse
+        from src.scripts.classify_users import run as classify_run
+
+        PAGE_ACTORS = {"facebook_page_posts", "instagram_profile_posts",
+                       "instagram_profile_queenlike"}
+
+        def _slug(url: str) -> str:
+            return url.rstrip("/").split("/", 3)[-1].lower() if url else ""
+
+        pages, phrases, official = set(), set(), set()
+        for t in flagged:
+            if t.actor_class in PAGE_ACTORS:
+                slugs = {_slug(p) for p in t.search_params}
+                names = {d.data.get("source") for d in all_documents
+                         if d.data.get("source") and _slug(d.data.get("profile_url") or "") in slugs}
+                pages |= names
+                if t.official_page:
+                    official |= names
+            else:
+                phrases |= set(t.search_params)
+        if pages or phrases:
+            logger.info("classify_users pass: %d pages, %d phrases (%d official)",
+                        len(pages), len(phrases), len(official))
+            try:
+                classify_run(_argparse.Namespace(
+                    pages=sorted(pages) or None, phrases=sorted(phrases) or None,
+                    networks=None, days=60, org=None, entities=None,
+                    min_activity=2, official_pages=sorted(official) or None,
+                    model=None, override=False, table_rows=20, apply=True,
+                ))
+            except Exception:
+                logger.exception("classify_users pass failed (crawl results unaffected)")
