@@ -53,6 +53,10 @@ SIMILARITY_SAMPLE_CAP = 30
 # Burstiness: two of an account's comments on *different* posts within this many
 # seconds of each other count as a burst pair (near-impossible for a human).
 BURST_WINDOW_SECONDS = 120
+# Cross-account coordination: two different accounts on the SAME post within
+# this window form a candidate pair; only a tight gap scores on its own.
+COORDINATION_WINDOW_SECONDS = 60
+COORDINATION_TIGHT_SECONDS = 30
 
 ES_FIELDS = [
     "source", "news_type", "author_name", "url", "fb_likes",
@@ -216,6 +220,12 @@ def harvest_evidence(es, pages: Optional[List[str]], networks: Optional[List[str
 
     accounts: Dict[str, Account] = {}
     page_post_counts: Dict[str, int] = {}
+    # Cross-post clone guard (2026-07-21): the same physical FB post can be
+    # ingested under two URL forms (different pfbid routes), cloning its whole
+    # comment list. A real re-poster acts twice, so their timestamps differ —
+    # the same (account, text, exact timestamp) on another post is the same
+    # comment, not evidence. Timestamp-less comments are exempt (can't tell).
+    seen_global: set = set()
     for hit in scan(es, index=index, query=query, _source=ES_FIELDS, size=500):
         src_doc = hit.get("_source", {})
         source = src_doc.get("source") or {}
@@ -255,6 +265,12 @@ def harvest_evidence(es, pages: Optional[List[str]], networks: Optional[List[str
             dup_key = (cacc.key, (c.get("comment_text") or "").strip().casefold())
             if dup_key in seen_in_post:
                 continue
+            cts_key = c.get("comment_timestamp")
+            if cts_key is not None:
+                global_key = dup_key + (str(cts_key),)
+                if global_key in seen_global:
+                    continue
+                seen_global.add(global_key)
             seen_in_post.add(dup_key)
             cacc.n_comments += 1
             if page_name:
@@ -381,6 +397,54 @@ def compute_features(acc: Account, official_pages: Optional[List[str]] = None,
     }
 
 
+def compute_coordination(accounts: Dict[str, Account]) -> None:
+    """Cross-account coordination (2026-07-21, from the WS-4 manual-label set):
+    different accounts hitting the SAME post within a tight window is a
+    many-hands-one-operator signal no per-account feature can see. Folds
+    per-account counters into ``acc.features``; ``compute_automation`` scores
+    them. Must run after ``compute_features`` and before classification."""
+    from collections import defaultdict
+
+    per_post: Dict[str, List[Tuple[datetime, str, str]]] = defaultdict(list)
+    for acc in accounts.values():
+        for c in acc.comment_items:
+            dt = _parse_dt(c.get("timestamp"))
+            if dt is not None and c.get("parent_doc_id"):
+                per_post[c["parent_doc_id"]].append((dt, acc.key, acc.display_name))
+
+    # (keyA, keyB) -> {post: min_gap_seconds}
+    pair_hits: Dict[Tuple[str, str], Dict[str, float]] = defaultdict(dict)
+    for post, items in per_post.items():
+        items.sort(key=lambda x: x[0])
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                gap = (items[j][0] - items[i][0]).total_seconds()
+                if gap > COORDINATION_WINDOW_SECONDS:
+                    break
+                if items[i][1] == items[j][1]:
+                    continue
+                pair = tuple(sorted((items[i][1], items[j][1])))
+                prev = pair_hits[pair].get(post)
+                if prev is None or gap < prev:
+                    pair_hits[pair][post] = gap
+
+    by_key: Dict[str, List[Tuple[str, int, float]]] = defaultdict(list)
+    names = {acc.key: acc.display_name for acc in accounts.values()}
+    for (a, b), posts in pair_hits.items():
+        min_gap = min(posts.values())
+        by_key[a].append((names.get(b, b), len(posts), min_gap))
+        by_key[b].append((names.get(a, a), len(posts), min_gap))
+
+    # Only annotate accounts that have a pair — features are part of the LLM
+    # cache key, so unconditional keys would invalidate every cached account.
+    for acc in accounts.values():
+        partners = sorted(by_key.get(acc.key, []), key=lambda x: (-x[1], x[2]))
+        if partners:
+            acc.features["coordination_pair_posts"] = partners[0][1]
+            acc.features["coordination_min_gap"] = round(min(p[2] for p in partners), 1)
+            acc.features["coordination_partners"] = [p[0] for p in partners[:3]]
+
+
 def compute_automation(features: Dict[str, Any]) -> Tuple[float, List[str]]:
     """Deterministic automation score (0-1) + short evidence strings.
 
@@ -414,6 +478,35 @@ def compute_automation(features: Dict[str, Any]) -> Tuple[float, List[str]]:
         score = max(score, 0.5 + burst_share / 2)
         evidence.append(
             f"{features.get('burst_count')} comentarios en ráfaga (<2min) en posts distintos"
+        )
+
+    # Low-volume identical repetition (2026-07-21, from the WS-4 manual-label
+    # set): one verbatim repeat across distinct posts PLUS a burst pair reaches
+    # the review band. Organic petitioners also repeat their ask verbatim, but
+    # across days — the burst is what separates paste-bots from vecinas.
+    if max_dup == 2 and distinct >= 2 and features.get("burst_count", 0) >= 1:
+        score = max(score, 0.5)
+        evidence.append(
+            "texto idéntico en 2 publicaciones distintas con ráfaga (<2min)"
+        )
+
+    # Cross-account coordination (2026-07-21): the same pair of accounts
+    # co-hitting several posts inside the window is near-impossible organically;
+    # a single co-occurrence only scores when the gap is seconds-tight.
+    pair_posts = features.get("coordination_pair_posts", 0)
+    min_gap = features.get("coordination_min_gap")
+    partners = features.get("coordination_partners") or []
+    if pair_posts >= 2:
+        score = max(score, 0.7)
+        evidence.append(
+            f"coordinación entre cuentas: co-comenta con {partners[0]} en "
+            f"{pair_posts} publicaciones dentro de {int(COORDINATION_WINDOW_SECONDS)}s"
+        )
+    elif min_gap is not None and min_gap <= COORDINATION_TIGHT_SECONDS and partners:
+        score = max(score, 0.5)
+        evidence.append(
+            f"coordinación entre cuentas: comentó a {int(min_gap)}s de {partners[0]} "
+            f"en la misma publicación"
         )
 
     # Systematic counter-messaging (decided 2026-07-21): an account that lives
@@ -826,6 +919,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     for acc in accounts.values():
         acc.features = compute_features(acc, official_pages=args.official_pages,
                                         page_post_counts=page_post_counts)
+    compute_coordination(accounts)
 
     matched = 0
     if args.org and args.entities:

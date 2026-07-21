@@ -183,6 +183,35 @@ class SocialUsers:
                                              | set(record.get("pages_touched") or []))
         self.collection.update_one({"_id": _id}, {"$set": record}, upsert=True)
 
+    def set_human_label(self, _id: str, automation: float, label: str,
+                        by: str, note: Optional[str] = None,
+                        date: Optional[str] = None) -> None:
+        """Attach a human judgment to an account (2026-07-21, WS-4 calibration).
+
+        Human labels live under the ``human`` key, which classifier upserts
+        never write — ``upsert`` uses ``$set`` with only the machine record's
+        keys, so re-classification can never clobber a reviewer's call. Reports
+        should read ``effective_automation`` rather than ``automation_score``.
+        """
+        human = {"automation": float(automation), "label": label, "by": by}
+        if note:
+            human["note"] = note
+        if date:
+            human["date"] = date
+        self.collection.update_one({"_id": _id}, {"$set": {"human": human}},
+                                   upsert=True)
+
+    @staticmethod
+    def effective_automation(record: Optional[Dict[str, Any]]) -> float:
+        """Max of the machine score and the human judgment — a reviewer's
+        certainty must not be diluted by a thin behavioral surface (accounts
+        whose tells are profile-level are invisible to the feature pipeline)."""
+        if not isinstance(record, dict):
+            return 0.0
+        machine = record.get("automation_score") or 0.0
+        human = (record.get("human") or {}).get("automation") or 0.0
+        return max(float(machine), float(human))
+
     def needs_reclassification(self, record: Dict[str, Any]) -> bool:
         """Decide whether a freshly-built record has materially new evidence.
 

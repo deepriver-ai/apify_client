@@ -387,3 +387,172 @@ def test_systematic_rule_catches_high_volume_low_coverage_critic():
              "burst_count": 0, "burst_share": 0.0}
     score, ev = compute_automation(feats)
     assert score >= 0.7
+
+
+# --- Low-volume rules from the WS-4 manual-label set (2026-07-21) ------------
+
+def test_low_volume_identical_pair_with_burst_reaches_review_band():
+    """Iker Mitz shape: identical text on 2 distinct posts within the burst
+    window -> review band (0.5), even though max_dup < 3."""
+    base = datetime(2026, 7, 13, 22, 23, 40, tzinfo=timezone.utc)
+    ts = [base.isoformat(), base.replace(minute=24).isoformat()]
+    acc = make_comment_account(
+        "Iker Mitz", ["Puro engaña tontos, bola de rateros"] * 2,
+        parent_docs=["https://p/a", "https://p/b"], timestamps=ts,
+    )
+    acc.features = cu.compute_features(acc)
+    score, evidence = cu.compute_automation(acc.features)
+    assert score >= 0.5
+    assert any("2 publicaciones distintas" in e for e in evidence)
+
+
+def test_organic_petitioner_repeat_across_days_stays_low():
+    """Verónica shape: same petition pasted on 2 posts days apart -> no burst,
+    no flag. The burst requirement is what separates paste-bots from vecinas."""
+    ts = [
+        datetime(2026, 7, 10, 9, 0, 0, tzinfo=timezone.utc).isoformat(),
+        datetime(2026, 7, 14, 21, 0, 0, tzinfo=timezone.utc).isoformat(),
+    ]
+    acc = make_comment_account(
+        "Veronica Valdez", ["Y comevi banthi para cuando saludos"] * 2,
+        parent_docs=["https://p/a", "https://p/b"], timestamps=ts,
+    )
+    acc.features = cu.compute_features(acc)
+    score, _ = cu.compute_automation(acc.features)
+    assert score < 0.5
+
+
+def _paired_accounts(gap_seconds, posts):
+    """Two accounts commenting gap_seconds apart on each of the given posts."""
+    base = datetime(2026, 7, 13, 22, 0, 0, tzinfo=timezone.utc)
+    accounts = {}
+    for name, offset in (("Cuenta A", 0), ("Cuenta B", gap_seconds)):
+        ts, texts, docs = [], [], []
+        for i, post in enumerate(posts):
+            t = base.replace(hour=22 + i)
+            ts.append((t.replace(second=0) if offset == 0
+                       else t.replace(second=int(offset))).isoformat())
+            texts.append(f"comentario {name} {i}")
+            docs.append(post)
+        acc = make_comment_account(name, texts, parent_docs=docs, timestamps=ts)
+        acc.features = cu.compute_features(acc)
+        accounts[acc.key] = acc
+    return accounts
+
+
+def test_coordination_tight_single_cooccurrence_scores_half():
+    """González/Iker shape: two accounts 10s apart on one post -> 0.5 floor."""
+    accounts = _paired_accounts(10, ["https://p/x"])
+    cu.compute_coordination(accounts)
+    for acc in accounts.values():
+        assert acc.features["coordination_min_gap"] == 10.0
+        score, evidence = cu.compute_automation(acc.features)
+        assert score >= 0.5
+        assert any("coordinación entre cuentas" in e for e in evidence)
+
+
+def test_coordination_repeated_pair_scores_high():
+    """Same pair co-hitting 2 posts inside the window -> 0.7 for both."""
+    accounts = _paired_accounts(45, ["https://p/x", "https://p/y"])
+    cu.compute_coordination(accounts)
+    for acc in accounts.values():
+        assert acc.features["coordination_pair_posts"] == 2
+        score, evidence = cu.compute_automation(acc.features)
+        assert score >= 0.7
+        assert any("2 publicaciones" in e for e in evidence)
+
+
+def test_coordination_loose_single_cooccurrence_does_not_score():
+    """A single 45s co-occurrence (inside window, beyond tight) records the
+    pair but does not move the score by itself."""
+    accounts = _paired_accounts(45, ["https://p/x"])
+    cu.compute_coordination(accounts)
+    for acc in accounts.values():
+        assert acc.features["coordination_min_gap"] == 45.0
+        score, evidence = cu.compute_automation(acc.features)
+        assert score < 0.5
+        assert not any("coordinación" in e for e in evidence)
+
+
+def test_no_coordination_keys_when_no_pairs():
+    """Features stay untouched for solo accounts — they are part of the LLM
+    cache key, so unconditional keys would invalidate every cached account."""
+    acc = make_comment_account(
+        "Solo Vecino", ["buen trabajo"],
+        timestamps=[datetime(2026, 7, 13, tzinfo=timezone.utc).isoformat()],
+    )
+    acc.features = cu.compute_features(acc)
+    cu.compute_coordination({acc.key: acc})
+    assert "coordination_pair_posts" not in acc.features
+    assert "coordination_min_gap" not in acc.features
+
+
+def test_cloned_post_comments_are_deduped_across_urls():
+    """The same physical post ingested under two pfbid URL forms clones its
+    comment list. Same (author, text, exact timestamp) on another post = the
+    same comment — it must not manufacture dup/burst/coordination signals.
+    A real re-poster (different timestamps) still counts twice."""
+    from unittest.mock import patch
+    from src.scripts import classify_users as cu
+
+    def doc(url, comments):
+        return {"_source": {
+            "source": {"name": "Pagina X", "stats": {}}, "news_type": "facebook",
+            "url": url, "date_created": "2026-07-01T10:00:00", "comments": comments,
+        }}
+
+    clone_comment = {"comment_author": "Adan Trejo", "comment_text": "Puras promesas",
+                     "comment_timestamp": "2026-07-14T00:03:18", "comment_likes": 0}
+    reposter = [
+        {"comment_author": "Iker Mitz", "comment_text": "Bola de rateros",
+         "comment_timestamp": "2026-07-13T22:23:50", "comment_likes": 0},
+        {"comment_author": "Iker Mitz", "comment_text": "Bola de rateros",
+         "comment_timestamp": "2026-07-13T22:24:40", "comment_likes": 0},
+    ]
+    docs = [
+        doc("https://facebook.com/p/pfbid_A", [clone_comment, reposter[0]]),
+        doc("https://facebook.com/p/pfbid_A_clone", [dict(clone_comment)]),
+        doc("https://facebook.com/p/other", [reposter[1]]),
+    ]
+    with patch.object(cu, "get_es_client"), \
+         patch("elasticsearch.helpers.scan", return_value=docs):
+        accounts, _ = cu.harvest_evidence(None, ["Pagina X"], None, 30)
+
+    adan = [a for a in accounts.values() if a.display_name == "Adan Trejo"][0]
+    assert adan.n_comments == 1                       # clone collapsed
+    adan.features = cu.compute_features(adan)
+    score, evidence = cu.compute_automation(adan.features)
+    assert score == 0.0 and not evidence
+
+    iker = [a for a in accounts.values() if a.display_name == "Iker Mitz"][0]
+    assert iker.n_comments == 2                       # real repost kept
+    iker.features = cu.compute_features(iker)
+    score, evidence = cu.compute_automation(iker.features)
+    assert score >= 0.5                               # dup+burst arm still fires
+
+
+# --- Human labels (2026-07-21) ----------------------------------------------
+
+def test_human_label_survives_classifier_upsert_and_wins_effective():
+    """A reviewer's judgment lives under ``human`` (never in the machine
+    record's $set) and effective_automation takes the max of both."""
+    from src.models.social_users import SocialUsers, account_id, TIER_NAME
+    store = SocialUsers(collection=MagicMock())
+    _id = account_id(TIER_NAME, network="facebook", name="Blacky White")
+
+    store.set_human_label(_id, 1.0, "automated_certain", by="oscar")
+    call = store.collection.update_one.call_args
+    assert call[0][1]["$set"] == {"human": {"automation": 1.0,
+                                            "label": "automated_certain", "by": "oscar"}}
+
+    # Classifier upsert of the same account: machine record has no `human` key.
+    store.collection.reset_mock()
+    store.get = MagicMock(return_value=None)
+    store.upsert({"_id": _id, "n_comments": 2, "n_posts": 0, "automation_score": 0.0})
+    setdoc = store.collection.update_one.call_args[0][1]["$set"]
+    assert "human" not in setdoc
+
+    rec = {"automation_score": 0.0, "human": {"automation": 1.0}}
+    assert SocialUsers.effective_automation(rec) == 1.0
+    assert SocialUsers.effective_automation({"automation_score": 0.7}) == 0.7
+    assert SocialUsers.effective_automation(None) == 0.0
