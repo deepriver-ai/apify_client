@@ -215,11 +215,14 @@ def harvest_evidence(es, pages: Optional[List[str]], networks: Optional[List[str
     query = {"query": {"bool": {"filter": filters}}}
 
     accounts: Dict[str, Account] = {}
+    page_post_counts: Dict[str, int] = {}
     for hit in scan(es, index=index, query=query, _source=ES_FIELDS, size=500):
         src_doc = hit.get("_source", {})
         source = src_doc.get("source") or {}
         network = (src_doc.get("news_type") or "").lower() or "unknown"
         page_name = source.get("name")
+        if page_name:
+            page_post_counts[page_name] = page_post_counts.get(page_name, 0) + 1
         post_url = src_doc.get("url")
         post_ts = src_doc.get("date_created")
 
@@ -268,7 +271,7 @@ def harvest_evidence(es, pages: Optional[List[str]], networks: Optional[List[str
             })
             cacc.note_ts(cts)
 
-    return accounts
+    return accounts, page_post_counts
 
 
 # --- Stage B: deterministic features ----------------------------------------
@@ -281,7 +284,24 @@ def _norm_text(t: str) -> str:
     return " ".join((t or "").lower().split())
 
 
-def compute_features(acc: Account) -> Dict[str, Any]:
+def _comments_per_active_day(acc: "Account") -> float:
+    """Mean comments per day over the account's active span (min 1 day)."""
+    from datetime import datetime
+    ts = []
+    for c in acc.comment_items:
+        t = c.get("timestamp")
+        try:
+            ts.append(datetime.fromisoformat(str(t).replace("Z", "+00:00")))
+        except (ValueError, TypeError):
+            pass
+    if not ts:
+        return 0.0
+    span_days = max(1.0, (max(ts) - min(ts)).total_seconds() / 86400.0)
+    return round(len(ts) / span_days, 2)
+
+
+def compute_features(acc: Account, official_pages: Optional[List[str]] = None,
+                     page_post_counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """Stage B. Pure-Python activity, repetition, engagement, burstiness and
     name-shape features for one account. No LLM, no embeddings."""
     comment_texts = [c["text"] for c in acc.comment_items if c.get("text")]
@@ -342,6 +362,17 @@ def compute_features(acc: Account) -> Dict[str, Any]:
         "burst_count": burst,
         "burst_share": round(burst / acc.n_comments, 3) if acc.n_comments else 0.0,
         "name_two_token": name_two_token,
+        # Systematic counter-messaging signals (2026-07-21, weighting decision:
+        # content-aware, high-frequency, official-pages-only accounts tracking
+        # every municipal action ARE strong automation indicators — we prefer
+        # flagging an unusually devoted citizen over missing an LLM-era bot).
+        "official_pages_only": bool(acc.pages) and bool(official_pages)
+            and acc.pages <= set(official_pages),
+        "official_page_coverage": round(
+            len(acc.parent_docs) / max(1, sum(page_post_counts.get(p, 0) for p in acc.pages)), 3)
+            if acc.pages and page_post_counts and official_pages
+               and acc.pages <= set(official_pages) else 0.0,
+        "comments_per_active_day": _comments_per_active_day(acc),
         "name_has_digits": name_has_digits,
     }
 
@@ -379,6 +410,29 @@ def compute_automation(features: Dict[str, Any]) -> Tuple[float, List[str]]:
         score = max(score, 0.5 + burst_share / 2)
         evidence.append(
             f"{features.get('burst_count')} comentarios en ráfaga (<2min) en posts distintos"
+        )
+
+    # Systematic counter-messaging (decided 2026-07-21): an account that lives
+    # ONLY on the customer's official pages, answers a large share of their
+    # posts, and always with the same polarity, is treated as probable
+    # automation even when every text differs — LLM-era bots are content-aware,
+    # and we prefer flagging a devoted citizen over missing a bot.
+    n = features.get("n_comments", 0)
+    cov = features.get("official_page_coverage", 0.0)
+    pol_consistent = features.get("extremity_share", 0.0) >= 0.9 and \
+        features.get("dominant_polarity") in ("negativo", "positivo")
+    if (features.get("official_pages_only") and n >= 5 and cov >= 0.4 and pol_consistent):
+        score = max(score, min(1.0, 0.6 + cov / 2))
+        evidence.append(
+            f"contramensaje sistemático: {n} comentarios solo en páginas oficiales, "
+            f"cubre {int(cov*100)}% de sus publicaciones, polaridad constante "
+            f"({features.get('dominant_polarity')})"
+        )
+    if features.get("comments_per_active_day", 0) >= 3 and n >= 6 and pol_consistent:
+        score = max(score, 0.6)
+        evidence.append(
+            f"frecuencia sostenida: {features.get('comments_per_active_day')} comentarios/día activo, "
+            f"polaridad constante"
         )
 
     return round(min(1.0, score), 3), evidence
@@ -751,13 +805,14 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     logger.info("Stage A: harvesting evidence from ES ...")
     if not args.pages and not args.phrases:
         raise SystemExit("give --pages and/or --phrases")
-    accounts = harvest_evidence(es, args.pages, args.networks, args.days,
-                                phrases=args.phrases)
+    accounts, page_post_counts = harvest_evidence(es, args.pages, args.networks, args.days,
+                                                  phrases=args.phrases)
     logger.info("Harvested %d accounts", len(accounts))
 
     logger.info("Stage B: computing deterministic features ...")
     for acc in accounts.values():
-        acc.features = compute_features(acc)
+        acc.features = compute_features(acc, official_pages=args.official_pages,
+                                        page_post_counts=page_post_counts)
 
     matched = 0
     if args.org and args.entities:

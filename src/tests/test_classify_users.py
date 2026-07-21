@@ -301,7 +301,7 @@ def test_same_post_duplicate_comments_are_scrape_artifacts():
     }}
     with patch.object(cu, "get_es_client"), \
          patch("elasticsearch.helpers.scan", return_value=[doc]):
-        accounts = cu.harvest_evidence(None, ["Pagina X"], None, 30)
+        accounts, _ = cu.harvest_evidence(None, ["Pagina X"], None, 30)
     acc = [a for a in accounts.values() if a.display_name == "Enrique Ochoas"][0]
     assert acc.n_comments == 1
     assert len(acc.comment_items) == 1
@@ -328,3 +328,49 @@ def test_phrases_scope_builds_match_phrase_should_clauses():
     import pytest
     with pytest.raises(ValueError):
         cu.harvest_evidence(None, None, None, 7)
+
+
+def test_systematic_counter_messaging_scores_high():
+    """Content-aware but official-only + high-coverage + single-polarity accounts
+    score as probable automation (2026-07-21 weighting decision) — varied text
+    must NOT exempt them."""
+    from src.scripts.classify_users import compute_automation
+
+    feats = {"n_comments": 16, "n_posts": 0, "n_distinct_parent_docs": 16,
+             "max_duplicate_text_count": 1, "duplicate_text_share": 0.0,
+             "mean_pairwise_similarity": 0.1, "burst_count": 0, "burst_share": 0.0,
+             "official_pages_only": True, "official_page_coverage": 0.8,
+             "comments_per_active_day": 1.5, "extremity_share": 1.0,
+             "dominant_polarity": "negativo"}
+    score, ev = compute_automation(feats)
+    assert score >= 0.7
+    assert any("contramensaje sistemático" in e for e in ev)
+
+    # A vecina with 5 varied complaints covering a small share of the page's
+    # posts stays low — coverage is the discriminator, not negativity.
+    feats2 = dict(feats, n_comments=5, n_distinct_parent_docs=5,
+                  official_page_coverage=0.12, comments_per_active_day=0.7)
+    score2, _ = compute_automation(feats2)
+    assert score2 < 0.5
+
+
+def test_upsert_narrow_scope_does_not_shrink_history():
+    """A campaign-scoped run must not overwrite a richer page-scope record
+    (2026-07-21 incident: 16-comment history replaced by a 2-comment snapshot)."""
+    from unittest.mock import MagicMock
+    from src.models.social_users import SocialUsers
+
+    store = SocialUsers(collection=MagicMock())
+    rich = {"_id": "name:facebook:x", "n_comments": 16, "n_posts": 0,
+            "pages_touched": ["Pagina A"], "evidence_as_of": "2026-07-20",
+            "classification": "organico"}
+    store.get = lambda _id: rich
+    narrow = {"_id": "name:facebook:x", "n_comments": 2, "n_posts": 0,
+              "pages_touched": ["Pagina B"], "evidence_as_of": "2026-07-21",
+              "classification": "organico"}
+    store.upsert(narrow)
+    call = store.collection.update_one.call_args
+    setdoc = call[0][1]["$set"]
+    assert "classification" not in setdoc          # features/class preserved
+    assert setdoc["pages_touched"] == ["Pagina A", "Pagina B"]
+    assert setdoc["evidence_as_of"] == "2026-07-21"

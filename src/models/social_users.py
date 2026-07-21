@@ -155,8 +155,32 @@ class SocialUsers:
     # --- Writes -------------------------------------------------------------
 
     def upsert(self, record: Dict[str, Any]) -> None:
-        """Upsert a fully-built classification record (keyed on ``_id``)."""
+        """Upsert a classification record without eating history across scopes.
+
+        Classifier runs are scoped (a page list, a phrase set); a narrow scope
+        must never shrink an account's stored evidence (2026-07-21 incident: a
+        campaign-scoped run overwrote a 16-comment history with a 2-comment
+        snapshot). Rule: the richer snapshot wins — if the stored record has
+        MORE appearances than the incoming one, keep its features/classification
+        and only union ``pages_touched`` and advance ``evidence_as_of``.
+        """
         _id = record["_id"]
+        stored = self.get(_id)
+        if isinstance(stored, dict):
+            old_app = (stored.get("n_comments") or 0) + (stored.get("n_posts") or 0)
+            new_app = (record.get("n_comments") or 0) + (record.get("n_posts") or 0)
+            if old_app > new_app:
+                pages = sorted(set(stored.get("pages_touched") or [])
+                               | set(record.get("pages_touched") or []))
+                as_of = max(str(stored.get("evidence_as_of") or ""),
+                            str(record.get("evidence_as_of") or "")) or None
+                self.collection.update_one(
+                    {"_id": _id},
+                    {"$set": {"pages_touched": pages, "evidence_as_of": as_of}})
+                return
+            record = dict(record)
+            record["pages_touched"] = sorted(set(stored.get("pages_touched") or [])
+                                             | set(record.get("pages_touched") or []))
         self.collection.update_one({"_id": _id}, {"$set": record}, upsert=True)
 
     def needs_reclassification(self, record: Dict[str, Any]) -> bool:
