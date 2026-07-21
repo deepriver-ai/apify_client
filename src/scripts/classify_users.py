@@ -428,8 +428,9 @@ def compute_automation(features: Dict[str, Any]) -> Tuple[float, List[str]]:
     pol_consistent = features.get("dominant_polarity") in ("negativo", "positivo") and (
         features.get("extremity_share", 0.0) >= 0.5)
     if (features.get("official_pages_only") and
-            ((n >= 5 and cov >= 0.4) or (n >= 10 and cov >= 0.22)) and pol_consistent):
-        score = max(score, min(1.0, 0.6 + cov / 2))
+            ((n >= 5 and cov >= 0.4) or (n >= 10 and cov >= 0.22)
+             or (n >= 20 and cov >= 0.1)) and pol_consistent):
+        score = max(score, min(1.0, max(0.7, 0.6 + cov / 2)))
         evidence.append(
             f"contramensaje sistemático: {n} comentarios solo en páginas oficiales, "
             f"cubre {int(cov*100)}% de sus publicaciones, polaridad constante "

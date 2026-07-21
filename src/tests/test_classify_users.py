@@ -381,7 +381,7 @@ def test_systematic_rule_catches_high_volume_low_coverage_critic():
     sarcasm-diluted extremity (0.52) — must flag under the n>=10 arm."""
     from src.scripts.classify_users import compute_automation
     feats = {"n_comments": 21, "official_pages_only": True,
-             "official_page_coverage": 0.25, "comments_per_active_day": 1.05,
+             "official_page_coverage": 0.197, "comments_per_active_day": 1.05,
              "extremity_share": 0.52, "dominant_polarity": "negativo",
              "max_duplicate_text_count": 1, "mean_pairwise_similarity": 0.1,
              "burst_count": 0, "burst_share": 0.0}
