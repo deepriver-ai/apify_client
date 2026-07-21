@@ -18,7 +18,7 @@ class InstagramPost(Post):
         data = cls._empty_data()
         data.update({
             "timestamp": item.get("timestamp"),
-            "source": "Instagram",
+            "source": item.get("ownerFullName") or username or "Instagram",
             "body": item.get("caption"),
             "title": item.get("caption", item.get("ownerFullName", ""))[:80],
             "url": item.get("url"),
@@ -65,7 +65,7 @@ class InstagramPost(Post):
         data = cls._empty_data()
         data.update({
             "timestamp": timestamp,
-            "source": "Instagram",
+            "source": full_name or username or "Instagram",
             "body": caption,
             "title": (caption or full_name or username or "")[:80] or None,
             "url": item.get("url"),

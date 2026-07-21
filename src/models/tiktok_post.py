@@ -40,7 +40,7 @@ class TikTokPost(Post):
         data = cls._empty_data()
         data.update({
             "timestamp": item.get("createTimeISO") or item.get("createTime") or item.get("timestamp"),
-            "source": "TikTok",
+            "source": author_full_name or username or "TikTok",
             "body": body,
             "title": (body[:80] or author_full_name or username or None) if body else (author_full_name or username or None),
             "url": item.get("webVideoUrl") or item.get("url") or item.get("videoUrl"),

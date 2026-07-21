@@ -249,6 +249,7 @@ class TestTikTokMapping:
         assert post.data["url"] == "https://www.tiktok.com/@valvoline_mx/video/7423000000000000000"
         assert post.data["profile_url"] == "https://www.tiktok.com/@valvoline_mx"
         assert post.data["author"] == "Valvoline Mexico"
+        assert post.data["source"] == "Valvoline Mexico"
         assert post.data["likes"] == 11
         assert post.data["shares"] == 2
         assert post.data["views"] == 300
@@ -256,6 +257,16 @@ class TestTikTokMapping:
         assert post.data["website_visits"] == 12345
         assert post.data["media_urls"] == ["https://example.com/video.mp4", "https://example.com/cover.jpg"]
         assert post.data["comments"][0]["comment_text"] == "Donde?"
+
+
+    def test_source_falls_back_to_username_then_platform(self, sample_tiktok_item):
+        item = dict(sample_tiktok_item)
+        item["authorMeta"] = {"name": "valvoline_mx"}
+        assert TikTokPost.from_tiktok(item).data["source"] == "valvoline_mx"
+        item["authorMeta"] = {}
+        item.pop("authorName", None)
+        item.pop("username", None)
+        assert TikTokPost.from_tiktok(item).data["source"] == "TikTok"
 
     def test_final_schema_accepts_tiktok_type(self, sample_tiktok_item):
         post = TikTokPost.from_tiktok(sample_tiktok_item)

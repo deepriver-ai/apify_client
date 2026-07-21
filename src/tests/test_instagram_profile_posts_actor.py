@@ -64,7 +64,7 @@ class TestSearchCreatesDocuments:
                 max_results=10,
             )
         video_post = [p for p in posts if p.data["post_type"] == "Video"][0]
-        assert video_post.data["source"] == "Instagram"
+        assert video_post.data["source"] == "TotalEnergies Mexico"
         assert video_post.data["views"] == 5000
         assert video_post.data["profile_url"] == "https://www.instagram.com/totalenergies_mx/"
 
