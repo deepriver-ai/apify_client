@@ -556,3 +556,98 @@ def test_human_label_survives_classifier_upsert_and_wins_effective():
     assert SocialUsers.effective_automation(rec) == 1.0
     assert SocialUsers.effective_automation({"automation_score": 0.7}) == 0.7
     assert SocialUsers.effective_automation(None) == 0.0
+
+
+# --- Slogan-family / sweep / rapid-fire features (2026-07-21, WS-4 round 2) --
+
+def test_slogan_family_near_duplicates_score():
+    """Francisco shape: ALL-CAPS slogan variants across posts — exact-dup
+    misses them, the near-dup cluster must not."""
+    texts = [
+        "SE ESTÁN ROBANDO EL PRESUPUESTO PARA SUS CAMPAÑAS ELECTORALES",
+        "!!!!! SE ESTÁN ROBANDO EL PRESUPUESTO PARA SUS CAMPAÑAS ELECTORALES !!!!!",
+        "SE ROBAN EL PRESUPUESTO PARA SUS CAMPAÑAS ELECTORALES",
+    ]
+    acc = make_comment_account("Francisco A", texts,
+                               parent_docs=["https://p/a", "https://p/b", "https://p/c"])
+    acc.features = cu.compute_features(acc)
+    assert acc.features["max_near_duplicate_count"] == 3
+    score, evidence = cu.compute_automation(acc.features)
+    assert score >= 0.5
+    assert any("casi idénticos" in e for e in evidence)
+
+
+def test_cross_page_slogan_scores_high():
+    """The same slogan family on 2+ different pages -> 0.7."""
+    key = account_id(TIER_NAME, network="facebook", name="Cross Pager")
+    acc = Account(tier=TIER_NAME, network="facebook", display_name="Cross Pager", key=key)
+    for i, (page, text) in enumerate([
+            ("Roberto Cabrera Valencia", "se están robando el presupuesto para sus campañas"),
+            ("Bitácora Diario", "se están robando el presupuesto para sus campañas electorales")]):
+        acc.n_comments += 1
+        acc.pages.add(page)
+        acc.parent_docs.add(f"https://p/{i}")
+        acc.comment_items.append({"text": text, "likes": 0, "timestamp": None,
+                                  "parent_doc_id": f"https://p/{i}", "page": page})
+    acc.features = cu.compute_features(acc)
+    assert acc.features["near_duplicate_pages"] == 2
+    score, evidence = cu.compute_automation(acc.features)
+    assert score >= 0.7
+    assert any("páginas distintas" in e for e in evidence)
+
+
+def test_short_texts_never_form_near_dup_clusters():
+    """'Gracias'/'Amén' organic staples are below NEAR_DUP_MIN_LEN."""
+    acc = make_comment_account("Vecina Agradecida", ["Gracias", "gracias", "Amén"],
+                               parent_docs=["https://p/a", "https://p/b", "https://p/c"])
+    acc.features = cu.compute_features(acc)
+    assert acc.features["max_near_duplicate_count"] == 0
+
+
+def test_sweep_thirty_minutes_flags():
+    """4+ distinct posts inside 30 minutes -> review band."""
+    base = datetime(2026, 7, 13, 21, 0, 0, tzinfo=timezone.utc)
+    ts = [(base.replace(minute=m)).isoformat() for m in (1, 6, 12, 18, 22)]
+    texts = [f"comentario distinto {i} suficientemente largo" * 1 for i in range(5)]
+    texts = ["puro robo aqui", "asaltos a la alza ya", "baches por todos lados si",
+             "infracciones fantasma otra vez", "policia cobrando cuota hoy"]
+    acc = make_comment_account("Barredora", texts,
+                               parent_docs=[f"https://p/{i}" for i in range(5)], timestamps=ts)
+    acc.features = cu.compute_features(acc)
+    assert acc.features["posts_swept_30min"] == 5
+    score, evidence = cu.compute_automation(acc.features)
+    assert score >= 0.5
+    assert any("30 minutos" in e for e in evidence)
+
+
+def test_rapid_fire_same_post_flags():
+    """Danny shape: boilerplate triplet on one post inside a minute."""
+    base = datetime(2026, 7, 19, 19, 37, 0, tzinfo=timezone.utc)
+    ts = [(base.replace(second=s)).isoformat() for s in (0, 20, 40)]
+    acc = make_comment_account("Auto Greeter", ["Buena tarde", "Gracias", "Gracias información"],
+                               parent_docs=["https://p/x"] * 3, timestamps=ts)
+    acc.features = cu.compute_features(acc)
+    assert acc.features["same_post_rapid_pairs"] == 2
+    score, evidence = cu.compute_automation(acc.features)
+    assert score >= 0.5
+    assert any("misma publicación" in e for e in evidence)
+
+
+def test_organic_complainer_still_clean_with_new_features():
+    """Negative control: varied grievances over days trip nothing new."""
+    ts = [datetime(2026, 7, 10 + i, 12, 0, 0, tzinfo=timezone.utc).isoformat() for i in range(4)]
+    texts = [
+        "Llevo tres días sin agua en la colonia Lomas, nadie responde",
+        "El bache de la avenida Juárez sigue igual, ya reporté dos veces",
+        "Cobraron el predial doble y en tesorería no dan solución",
+        "La basura no la recogen desde el lunes en el centro",
+    ]
+    acc = make_comment_account("Ma Elena Vazquez", texts,
+                               parent_docs=[f"https://p/{i}" for i in range(4)], timestamps=ts)
+    acc.features = cu.compute_features(acc)
+    f = acc.features
+    assert f["max_near_duplicate_count"] <= 1
+    assert f["posts_swept_30min"] <= 1
+    assert f["same_post_rapid_pairs"] == 0
+    score, _ = cu.compute_automation(acc.features)
+    assert score < 0.5

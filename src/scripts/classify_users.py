@@ -57,6 +57,18 @@ BURST_WINDOW_SECONDS = 120
 # this window form a candidate pair; only a tight gap scores on its own.
 COORDINATION_WINDOW_SECONDS = 60
 COORDINATION_TIGHT_SECONDS = 30
+# Slogan families (2026-07-21, from the WS-4 label set): variant texts dodge
+# exact-dup matching, so near-duplicates cluster at this difflib ratio. Only
+# texts this long participate — short organic staples ("gracias", "amén")
+# must never form clusters.
+NEAR_DUP_RATIO = 0.8
+NEAR_DUP_MIN_LEN = 15
+# Sweep: distinct posts commented inside this sliding window (humans rarely
+# work through 4+ posts in half an hour; paste operators do).
+SWEEP_WINDOW_SECONDS = 1800
+# Rapid fire: multiple comments on the SAME post within this gap (the
+# auto-greeter shape: boilerplate triplets inside one minute).
+RAPID_FIRE_SECONDS = 60
 
 ES_FIELDS = [
     "source", "news_type", "author_name", "url", "fb_likes",
@@ -344,6 +356,28 @@ def compute_features(acc: Account, official_pages: Optional[List[str]] = None,
     mean_likes = round(sum(likes) / len(likes), 2) if likes else 0.0
     max_likes = max(likes) if likes else 0
 
+    # Near-duplicate clusters (slogan families): exact dup misses variants and
+    # mean similarity is diluted by unrelated/empty texts — cluster long-enough
+    # texts at NEAR_DUP_RATIO and track the largest cluster and how many
+    # distinct pages/posts it spans. Pairs with texts and page/post context.
+    eligible = [( _norm_text(c["text"]), c.get("page"), c.get("parent_doc_id"))
+                for c in acc.comment_items
+                if c.get("text") and len(_norm_text(c["text"])) >= NEAR_DUP_MIN_LEN]
+    eligible = eligible[:SIMILARITY_SAMPLE_CAP]
+    near_dup = 0
+    near_dup_pages = 0
+    near_dup_posts = 0
+    for i, (ti, _, _) in enumerate(eligible):
+        cluster = [(pg, doc) for j, (tj, pg, doc) in enumerate(eligible)
+                   if i == j or SequenceMatcher(None, ti, tj).ratio() >= NEAR_DUP_RATIO]
+        if len(cluster) > near_dup:
+            near_dup = len(cluster)
+            near_dup_pages = len({pg for pg, _ in cluster if pg})
+            near_dup_posts = len({doc for _, doc in cluster if doc})
+
+    # Empty/sticker comments (text-less): organic petitioners rarely spam them.
+    n_empty = sum(1 for c in acc.comment_items if not (c.get("text") or "").strip())
+
     # Burstiness: comments on *different* posts within a short window.
     stamped: List[Tuple[datetime, Optional[str]]] = []
     for c in acc.comment_items:
@@ -357,6 +391,21 @@ def compute_features(acc: Account, official_pages: Optional[List[str]] = None,
         dt_cur, doc_cur = stamped[i]
         if (dt_cur - dt_prev).total_seconds() <= BURST_WINDOW_SECONDS and doc_cur != doc_prev:
             burst += 1
+
+    # Sweep: max distinct posts hit inside any SWEEP_WINDOW_SECONDS window.
+    swept = 0
+    for i in range(len(stamped)):
+        window_docs = {doc for dt, doc in stamped[i:]
+                       if (dt - stamped[i][0]).total_seconds() <= SWEEP_WINDOW_SECONDS and doc}
+        swept = max(swept, len(window_docs))
+
+    # Rapid fire: pairs of comments on the SAME post within RAPID_FIRE_SECONDS.
+    rapid_pairs = 0
+    for i in range(1, len(stamped)):
+        dt_prev, doc_prev = stamped[i - 1]
+        dt_cur, doc_cur = stamped[i]
+        if (dt_cur - dt_prev).total_seconds() <= RAPID_FIRE_SECONDS and doc_cur == doc_prev:
+            rapid_pairs += 1
 
     # Name shape (weak anonymity signal).
     name = acc.display_name or ""
@@ -377,6 +426,12 @@ def compute_features(acc: Account, official_pages: Optional[List[str]] = None,
         "max_comment_likes": max_likes,
         "burst_count": burst,
         "burst_share": round(burst / acc.n_comments, 3) if acc.n_comments else 0.0,
+        "max_near_duplicate_count": near_dup,
+        "near_duplicate_pages": near_dup_pages,
+        "near_duplicate_posts": near_dup_posts,
+        "empty_comment_share": round(n_empty / acc.n_comments, 3) if acc.n_comments else 0.0,
+        "posts_swept_30min": swept,
+        "same_post_rapid_pairs": rapid_pairs,
         "name_two_token": name_two_token,
         # Systematic counter-messaging signals (2026-07-21, weighting decision:
         # content-aware, high-frequency, official-pages-only accounts tracking
@@ -478,6 +533,40 @@ def compute_automation(features: Dict[str, Any]) -> Tuple[float, List[str]]:
         score = max(score, 0.5 + burst_share / 2)
         evidence.append(
             f"{features.get('burst_count')} comentarios en ráfaga (<2min) en posts distintos"
+        )
+
+    # Slogan families (2026-07-21, WS-4 labels: Jorge Moreno, Francisco
+    # Aguilar): near-duplicate variants dodge exact-dup matching. A cluster of
+    # 3+ long near-identical texts scores like repetition; the same family
+    # spanning 2+ PAGES is the strongest single signal (an organic petitioner
+    # stays where the mayor is; an operation follows the topic across venues).
+    near_dup = features.get("max_near_duplicate_count", 0)
+    if near_dup >= 3:
+        score = max(score, min(1.0, 0.5 + (near_dup - 3) * 0.15))
+        evidence.append(
+            f"{near_dup} comentarios casi idénticos (variantes de consigna) en "
+            f"{features.get('near_duplicate_posts', 0)} publicaciones"
+        )
+    if near_dup >= 2 and features.get("near_duplicate_pages", 0) >= 2:
+        score = max(score, 0.7)
+        evidence.append(
+            f"misma consigna en {features.get('near_duplicate_pages')} páginas distintas"
+        )
+
+    # Sweep (Francisco Aguilar shape): 4+ distinct posts inside 30 minutes.
+    swept = features.get("posts_swept_30min", 0)
+    if swept >= 4:
+        score = max(score, 0.5)
+        evidence.append(f"comentó {swept} publicaciones distintas en 30 minutos")
+
+    # Rapid fire on one post (Danny Esquivel shape): boilerplate multi-comment
+    # inside a minute, repeated as a habit (require 2+ pairs so a single
+    # correction/follow-up comment never flags).
+    rapid = features.get("same_post_rapid_pairs", 0)
+    if rapid >= 2 and features.get("n_comments", 0) >= 3:
+        score = max(score, 0.5)
+        evidence.append(
+            f"ráfagas dentro de la misma publicación ({rapid} pares <1 min)"
         )
 
     # Low-volume identical repetition (2026-07-21, from the WS-4 manual-label
