@@ -205,7 +205,13 @@ class SocialUsers:
     def effective_automation(record: Optional[Dict[str, Any]]) -> float:
         """Max of the machine score and the human judgment — a reviewer's
         certainty must not be diluted by a thin behavioral surface (accounts
-        whose tells are profile-level are invisible to the feature pipeline)."""
+        whose tells are profile-level are invisible to the feature pipeline).
+
+        Consumers deriving a ``bot`` badge should ALSO exclude classes
+        ``pagina_oficial`` and ``sitio_*``: outlets and official pages post
+        repetitively by nature (e.g. a newspaper account dropping its own
+        links scores 0.8), which is automation but not a bot in the
+        presented taxonomy (2026-07-21 media-scope validation)."""
         if not isinstance(record, dict):
             return 0.0
         machine = record.get("automation_score") or 0.0

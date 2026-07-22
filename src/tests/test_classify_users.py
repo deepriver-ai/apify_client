@@ -651,3 +651,31 @@ def test_organic_complainer_still_clean_with_new_features():
     assert f["same_post_rapid_pairs"] == 0
     score, _ = cu.compute_automation(acc.features)
     assert score < 0.5
+
+
+def test_tight_pair_on_busy_stream_does_not_score():
+    """On a viral post with a dense comment stream, a tight gap between two
+    strangers is the normal case — evidence only, no score."""
+    from datetime import timedelta
+    base = datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc)
+    accounts = {}
+    # the tight pair (10s apart)
+    for name, off in (("Cuenta A", 0), ("Cuenta B", 10)):
+        acc = make_comment_account(name, [f"texto de {name}"],
+                                   parent_docs=["https://p/viral"],
+                                   timestamps=[(base + timedelta(seconds=off)).isoformat()])
+        acc.features = cu.compute_features(acc)
+        accounts[acc.key] = acc
+    # a busy surrounding stream: 5 other accounts within ±5 min
+    for i in range(5):
+        acc = make_comment_account(f"Vecino {i}", [f"comentario cualquiera {i}"],
+                                   parent_docs=["https://p/viral"],
+                                   timestamps=[(base + timedelta(seconds=30 + i * 40)).isoformat()])
+        acc.features = cu.compute_features(acc)
+        accounts[acc.key] = acc
+    cu.compute_coordination(accounts)
+    a = next(x for x in accounts.values() if x.display_name == "Cuenta A")
+    assert a.features["coordination_stream_density"] >= 2
+    score, evidence = cu.compute_automation(a.features)
+    assert score < 0.5
+    assert not any("coordinación" in e for e in evidence)

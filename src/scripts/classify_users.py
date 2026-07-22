@@ -483,12 +483,27 @@ def compute_coordination(accounts: Dict[str, Account]) -> None:
                 if prev is None or gap < prev:
                     pair_hits[pair][post] = gap
 
-    by_key: Dict[str, List[Tuple[str, int, float]]] = defaultdict(list)
+    # Stream density around each pair's tightest co-occurrence: on a busy
+    # viral post two strangers land seconds apart all the time (2026-07-21
+    # media-page validation: 6 organic false positives). Count OTHER accounts'
+    # comments within ±5 min of the pair moment — a quiet stream keeps the
+    # signal, a dense one demotes it to evidence-only.
+    pair_density: Dict[Tuple[str, str], int] = {}
+    for (a, b), posts in pair_hits.items():
+        post, gap = min(posts.items(), key=lambda kv: kv[1])
+        items = per_post[post]
+        moment = next(dt for dt, key, _ in items if key in (a, b))
+        pair_density[(a, b)] = sum(
+            1 for dt, key, _ in items
+            if key not in (a, b) and abs((dt - moment).total_seconds()) <= 300)
+
+    by_key: Dict[str, List[Tuple[str, int, float, int]]] = defaultdict(list)
     names = {acc.key: acc.display_name for acc in accounts.values()}
     for (a, b), posts in pair_hits.items():
         min_gap = min(posts.values())
-        by_key[a].append((names.get(b, b), len(posts), min_gap))
-        by_key[b].append((names.get(a, a), len(posts), min_gap))
+        density = pair_density[(a, b)]
+        by_key[a].append((names.get(b, b), len(posts), min_gap, density))
+        by_key[b].append((names.get(a, a), len(posts), min_gap, density))
 
     # Only annotate accounts that have a pair — features are part of the LLM
     # cache key, so unconditional keys would invalidate every cached account.
@@ -498,6 +513,7 @@ def compute_coordination(accounts: Dict[str, Account]) -> None:
             acc.features["coordination_pair_posts"] = partners[0][1]
             acc.features["coordination_min_gap"] = round(min(p[2] for p in partners), 1)
             acc.features["coordination_partners"] = [p[0] for p in partners[:3]]
+            acc.features["coordination_stream_density"] = min(p[3] for p in partners)
 
 
 def compute_automation(features: Dict[str, Any]) -> Tuple[float, List[str]]:
@@ -591,11 +607,14 @@ def compute_automation(features: Dict[str, Any]) -> Tuple[float, List[str]]:
             f"coordinación entre cuentas: co-comenta con {partners[0]} en "
             f"{pair_posts} publicaciones dentro de {int(COORDINATION_WINDOW_SECONDS)}s"
         )
-    elif min_gap is not None and min_gap <= COORDINATION_TIGHT_SECONDS and partners:
+    elif (min_gap is not None and min_gap <= COORDINATION_TIGHT_SECONDS and partners
+          and features.get("coordination_stream_density", 0) <= 1):
+        # A tight single co-occurrence only scores in a QUIET stream — on a
+        # busy viral post, strangers seconds apart is the normal case.
         score = max(score, 0.5)
         evidence.append(
             f"coordinación entre cuentas: comentó a {int(min_gap)}s de {partners[0]} "
-            f"en la misma publicación"
+            f"en la misma publicación (hilo tranquilo)"
         )
 
     # Systematic counter-messaging (decided 2026-07-21): an account that lives
