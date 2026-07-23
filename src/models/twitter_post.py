@@ -11,7 +11,7 @@ class TwitterPost(Post):
     @classmethod
     def from_twitter(cls, item: Dict[str, Any]) -> TwitterPost:
         """Create a TwitterPost from a raw api-ninja/x-twitter-advanced-search tweet."""
-        user = item.get("author") or item.get("user") or {}
+        user = item.get("author") or item.get("user_info") or {}
         screen_name = (
             user.get("userName")
             or user.get("screen_name")
