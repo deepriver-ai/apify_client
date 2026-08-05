@@ -22,12 +22,15 @@ from src.models.news_parser import load_url
 from src.models.news_parser.load_url import (
     CONNECT_TIMEOUT,
     READ_TIMEOUTS,
+    _extract_client_redirect,
     fetch_html,
 )
 from src.models.news_parser.parser import (
     _extract_oem,
+    _extract_revvialibre,
     _has_meaningful_content,
     _looks_like_section_label_list,
+    _parse_with_llm,
     _try_domain_extractor,
     _try_jsonld,
     extract_article,
@@ -36,6 +39,8 @@ from src.models.news_parser.parser import (
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 OEM_FIXTURE = os.path.join(CACHE_DIR, "oem_related_content_sample.html")
 OEM_FLIGHT_FIXTURE = os.path.join(CACHE_DIR, "oem_flight_stream_sample.html")
+VIALIBRE_FIXTURE = os.path.join(CACHE_DIR, "vialibre_article_sample.html")
+VIALIBRE_URL = "https://revvialibre.com.mx/noticias.php?noticia=12959"
 OEM_URL = (
     "https://oem.com.mx/elsoldesanjuandelrio/local/"
     "ciudadania-tendra-que-defender-programas-hidricos-tono-perez-31157721"
@@ -196,6 +201,120 @@ class TestFetchTimeouts:
 
 
 # --------------------------------------------------------------------------- #
+# Client-side (JS / meta-refresh) redirect interstitials — t.co
+# --------------------------------------------------------------------------- #
+# The real t.co response for a tweet's article link: HTTP 200, ~400 bytes,
+# redirecting only from the browser.
+TCO_URL = "https://t.co/ETWPqYVwiw"
+TCO_TARGET = "https://edomexaldia.com/lubricantes-de-motor-totalenergies-proteccion-avanzada/"
+TCO_INTERSTITIAL = (
+    '<head><noscript><META http-equiv="refresh" content="0;URL='
+    f'{TCO_TARGET}"></noscript><title>{TCO_TARGET}</title></head>'
+    '<script>window.opener = null; location.replace('
+    '"https:\\/\\/edomexaldia.com\\/lubricantes-de-motor-totalenergies-proteccion-avanzada\\/"'
+    ")</script>"
+)
+
+
+class TestClientSideRedirect:
+    def test_meta_refresh_target_extracted(self):
+        assert _extract_client_redirect(TCO_INTERSTITIAL, TCO_URL) == TCO_TARGET
+
+    def test_js_location_replace_target_unescaped(self):
+        # No <meta>: the escaped location.replace() argument must still resolve.
+        html = (
+            "<head><script>location.replace("
+            '"https:\\/\\/edomexaldia.com\\/nota\\/")</script></head>'
+        )
+        assert _extract_client_redirect(html, TCO_URL) == "https://edomexaldia.com/nota/"
+
+    def test_relative_target_resolved_against_final_url(self):
+        html = '<meta http-equiv="refresh" content="0;URL=/nota-123/">'
+        assert (
+            _extract_client_redirect(html, "https://outlet.example/x")
+            == "https://outlet.example/nota-123/"
+        )
+
+    def test_large_page_with_meta_refresh_is_not_followed(self):
+        # A real article that merely contains a meta-refresh must keep its own
+        # content — only interstitial-sized responses are redirected.
+        html = (
+            '<meta http-equiv="refresh" content="0;URL=https://elsewhere.example/">'
+            + "<p>contenido</p>" * 500
+        )
+        assert len(html) > load_url.MAX_INTERSTITIAL_SIZE
+        assert _extract_client_redirect(html, TCO_URL) is None
+
+    def test_plain_page_returns_none(self):
+        assert _extract_client_redirect("<html><p>hola</p></html>", TCO_URL) is None
+
+    def test_fetch_html_follows_interstitial_to_real_article(self):
+        interstitial = _fake_response(TCO_INTERSTITIAL.encode(), url=TCO_URL)
+        article = _fake_response(b"<html><p>el motor</p></html>", url=TCO_TARGET)
+        with patch.object(
+            load_url.requests, "get", side_effect=[interstitial, article]
+        ) as mock_get:
+            html, final = fetch_html(TCO_URL)
+
+        # final_url is the real article — it becomes the document's ES _id.
+        assert final == TCO_TARGET
+        assert "el motor" in html
+        assert mock_get.call_count == 2
+        assert mock_get.call_args_list[1].args[0] == TCO_TARGET
+
+    def test_self_referencing_interstitial_does_not_loop(self):
+        stub = (
+            f'<meta http-equiv="refresh" content="0;URL={TCO_URL}">'
+        ).encode()
+        resp = _fake_response(stub, url=TCO_URL)
+        with patch.object(load_url.requests, "get", return_value=resp) as mock_get:
+            _, final = fetch_html(TCO_URL)
+        assert final == TCO_URL
+        assert mock_get.call_count == 1
+
+    def test_redirect_chain_is_bounded(self):
+        # Every hop hands back a fresh interstitial: the loop must stop.
+        responses = [
+            _fake_response(
+                f'<meta http-equiv="refresh" content="0;URL=https://hop{i}.example/">'.encode(),
+                url=f"https://hop{i - 1}.example/" if i else TCO_URL,
+            )
+            for i in range(load_url.MAX_CLIENT_REDIRECTS + 3)
+        ]
+        with patch.object(load_url.requests, "get", side_effect=responses) as mock_get:
+            fetch_html(TCO_URL)
+        assert mock_get.call_count == load_url.MAX_CLIENT_REDIRECTS + 1
+
+
+# --------------------------------------------------------------------------- #
+# LLM tier refuses contentless pages (it invents articles rather than failing)
+# --------------------------------------------------------------------------- #
+class TestLlmContentGuard:
+    def test_interstitial_never_reaches_the_llm(self):
+        with patch("src.oai.llm_core.llm_cached_call") as mock_llm:
+            assert _parse_with_llm(TCO_INTERSTITIAL, TCO_URL) is None
+        assert not mock_llm.called
+
+    def test_empty_html_never_reaches_the_llm(self):
+        with patch("src.oai.llm_core.llm_cached_call") as mock_llm:
+            assert _parse_with_llm("", "https://x.example/") is None
+            assert _parse_with_llm("<html><body></body></html>", "https://x.example/") is None
+        assert not mock_llm.called
+
+    def test_script_and_style_text_does_not_count_as_content(self):
+        html = "<html><script>" + "var x = 1; " * 200 + "</script><body>hola</body></html>"
+        with patch("src.oai.llm_core.llm_cached_call") as mock_llm:
+            assert _parse_with_llm(html, "https://x.example/") is None
+        assert not mock_llm.called
+
+    def test_real_page_still_reaches_the_llm(self):
+        html = f"<html><body><p>{_GOOD_BODY}</p></body></html>"
+        with patch("src.oai.llm_core.llm_cached_call", return_value={}) as mock_llm:
+            _parse_with_llm(html, "https://x.example/")
+        assert mock_llm.called
+
+
+# --------------------------------------------------------------------------- #
 # Tier 1 — generic JSON-LD articleBody extraction
 # --------------------------------------------------------------------------- #
 def _ld_html(node_json: str, body_html: str = "") -> str:
@@ -321,6 +440,54 @@ class TestOemFlightStreamTier:
     def test_no_flight_stream_returns_none(self):
         html = "<html><body><p>plain page</p></body></html>"
         assert _extract_oem(html, OEM_URL) is None
+
+
+class TestVialibreTier:
+    """revvialibre.com.mx — static PHP template, no JSON-LD.
+
+    NewsPlease picks the teaser-card grid instead of the article, and the
+    result slips past ``_looks_like_related_posts_list`` (only two "Leer Más"
+    links survive), so the page needs a deterministic domain extractor.
+    """
+
+    def _load(self):
+        with open(VIALIBRE_FIXTURE, encoding="utf-8") as f:
+            return f.read()
+
+    def test_extracts_article_body(self):
+        result = _extract_revvialibre(self._load(), VIALIBRE_URL)
+        assert result is not None
+        assert result["body"].startswith("El motor es el corazón de un vehículo")
+        assert "Total Quartz" in result["body"]
+
+    def test_excludes_sidebar_and_teaser_cards(self):
+        body = _extract_revvialibre(self._load(), VIALIBRE_URL)["body"]
+        assert "Patrocinadores" not in body
+        assert "Leer Más" not in body
+        assert "Vipal Cauchos" not in body
+
+    def test_byline_split_into_author_and_timestamp(self):
+        result = _extract_revvialibre(self._load(), VIALIBRE_URL)
+        assert result["author"] == "vialibre"
+        assert result["timestamp"] == "2026-07-30"
+        # The byline must not be left prefixed to the body.
+        assert "30/07/2026" not in result["body"]
+
+    def test_title_and_lead_image(self):
+        result = _extract_revvialibre(self._load(), VIALIBRE_URL)
+        assert result["title"] == "Lubricantes de motor TotalEnergies: protección avanzada"
+        assert result["media_urls"] == [
+            "http://revvialibre.com.mx/catalogo/1785470655.jpg"
+        ]
+
+    def test_unexpected_layout_returns_none(self):
+        html = "<html><body><p>plain page</p></body></html>"
+        assert _extract_revvialibre(html, VIALIBRE_URL) is None
+
+    def test_registered_in_domain_registry(self):
+        result = _try_domain_extractor(self._load(), VIALIBRE_URL)
+        assert result is not None
+        assert "Total Quartz" in result["body"]
 
 
 # --------------------------------------------------------------------------- #

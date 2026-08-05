@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from typing import Optional
+from urllib.parse import urljoin
 
 import requests
 
@@ -60,13 +62,84 @@ READ_TIMEOUTS = (90, 120, 150)
 REQUESTS_TIMEOUT = READ_TIMEOUTS[0]
 MAX_RESP_SIZE = 10 * 1024 * 1024  # 10 MB
 
+# --- Client-side (JS / meta-refresh) redirect interstitials ------------------ #
+# Some shorteners answer HTTP 200 with a tiny HTML stub that redirects from the
+# browser instead of sending a 3xx, so ``requests`` has nothing to follow.
+# X's t.co is the case that matters here — a tweet's article link arrives as
+# https://t.co/XXXX and returns ~400 bytes of:
+#     <head><noscript><META http-equiv="refresh" content="0;URL=https://real/..."></noscript>
+#     <script>window.opener = null; location.replace("https:\/\/real\/...")</script></head>
+# Without this, the attached-article fetch keeps the t.co URL as the document's
+# URL (i.e. its ES _id) and hands a contentless stub down the parse cascade.
+#
+# Only *small* responses are inspected: a real article page that happens to
+# contain a meta-refresh (cookie walls, "this page has moved" banners appended
+# to full content) must not be redirected away from its own content.
+MAX_INTERSTITIAL_SIZE = 4096
+MAX_CLIENT_REDIRECTS = 3
+
+_META_REFRESH_RE = re.compile(
+    r"""<meta[^>]+http-equiv\s*=\s*['"]?refresh['"]?[^>]*"""
+    r"""content\s*=\s*['"]\s*\d+\s*;\s*url\s*=\s*([^'"]+)['"]""",
+    re.IGNORECASE,
+)
+_JS_REDIRECT_RE = re.compile(
+    r"""(?:location\.replace|location\.assign)\s*\(\s*['"]([^'"]+)['"]"""
+    r"""|(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]""",
+    re.IGNORECASE,
+)
+
+
+def _extract_client_redirect(html: str, base_url: str) -> Optional[str]:
+    """Return the target of a JS/meta-refresh interstitial, or None.
+
+    Only fires for responses small enough to be an interstitial rather than a
+    real page. JS string escapes (``https:\\/\\/host``) are unescaped and
+    relative targets are resolved against ``base_url``.
+    """
+    if not html or len(html) > MAX_INTERSTITIAL_SIZE:
+        return None
+
+    match = _META_REFRESH_RE.search(html)
+    target = match.group(1) if match else None
+    if target is None:
+        match = _JS_REDIRECT_RE.search(html)
+        if match:
+            target = match.group(1) or match.group(2)
+    if not target:
+        return None
+
+    target = target.strip().replace("\\/", "/").replace("&amp;", "&")
+    resolved = urljoin(base_url, target)
+    if not resolved.lower().startswith(("http://", "https://")):
+        return None
+    return resolved
+
 
 def fetch_html(url: str, max_retries: int = 3) -> tuple[Optional[str], Optional[str]]:
     """Download a URL and return (html, final_url), or (None, None) on failure.
 
-    ``final_url`` is the URL after following any redirects, which may differ
-    from the input when the original URL is shortened or redirected.
+    ``final_url`` is the URL after following any redirects — both HTTP 3xx
+    (handled by ``requests``) and client-side JS/meta-refresh interstitials
+    (handled here, see ``_extract_client_redirect``) — so it may differ from the
+    input when the original URL is shortened or redirected.
     """
+    seen = {url}
+    html, final_url = _fetch_html_once(url, max_retries)
+    for _ in range(MAX_CLIENT_REDIRECTS):
+        if html is None or final_url is None:
+            break
+        target = _extract_client_redirect(html, final_url)
+        if target is None or target in seen:
+            break
+        logger.info("Client-side redirect: %s -> %s", final_url, target)
+        seen.add(target)
+        html, final_url = _fetch_html_once(target, max_retries)
+    return html, final_url
+
+
+def _fetch_html_once(url: str, max_retries: int = 3) -> tuple[Optional[str], Optional[str]]:
+    """Download a URL following HTTP 3xx only. See ``fetch_html``."""
     for attempt in range(max_retries):
         read_timeout = READ_TIMEOUTS[min(attempt, len(READ_TIMEOUTS) - 1)]
         try:

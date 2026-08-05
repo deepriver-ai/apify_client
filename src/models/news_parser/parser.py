@@ -432,9 +432,90 @@ def _extract_oem(html: str, url: str) -> Optional[Dict[str, Any]]:
     }
 
 
+# --- Revista Vía Libre (revvialibre.com.mx) static PHP template --------------- #
+# The article lives in a plain server-rendered block:
+#   <section class="bg-white container"><div class="row"><div class="col-md-8">
+#       <h2>title</h2>
+#       <div class="text-center"><img src="…"></div>
+#       <div class="text-center"> share buttons </div>
+#       <div class="text-justify">
+#           <div>author&nbsp;dd/mm/yyyy</div>
+#           body text …
+#       </div>
+# There is no JSON-LD at all, and the page also carries a "Patrocinadores"
+# sidebar plus a grid of teaser cards ("Camiones … Leer Más") that NewsPlease
+# mistakes for the article — it slips past _looks_like_related_posts_list
+# because only two "Leer Más" links survive the extraction (the guard needs 3).
+_VIALIBRE_BYLINE_RE = re.compile(
+    r"^(?P<author>.*?)\s*(?P<date>\d{1,2}/\d{1,2}/\d{4})\s*$"
+)
+
+
+def _extract_revvialibre(html: str, url: str) -> Optional[Dict[str, Any]]:
+    """Extract a Revista Vía Libre article from its static PHP template.
+
+    Reads title, lead image, byline (``author dd/mm/yyyy``) and body from the
+    ``col-md-8`` article column, ignoring the sponsor sidebar and the teaser
+    card grid. Returns ``None`` on any failure so the cascade continues.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    section = soup.select_one("section.bg-white .col-md-8")
+    if section is None:
+        return None
+
+    body_node = section.select_one("div.text-justify")
+    if body_node is None:
+        return None
+
+    # The byline sits in the first inner <div> of the body block; pull it out
+    # so it doesn't end up prefixed to the article text.
+    author = None
+    timestamp = None
+    byline_node = body_node.find("div")
+    if byline_node is not None:
+        match = _VIALIBRE_BYLINE_RE.match(
+            byline_node.get_text(" ", strip=True).replace("\xa0", " ").strip()
+        )
+        if match:
+            author = match.group("author").strip() or None
+            day, month, year = match.group("date").split("/")
+            timestamp = f"{year}-{int(month):02d}-{int(day):02d}"
+        byline_node.extract()
+
+    body = "\n".join(
+        line.strip() for line in body_node.get_text("\n").splitlines() if line.strip()
+    )
+    if len(body) < MIN_BODY_LENGTH:
+        logger.warning(
+            "Vía Libre extractor got only %d chars of body for %s — falling through",
+            len(body),
+            url,
+        )
+        return None
+
+    title_node = section.find("h2")
+    title = title_node.get_text(" ", strip=True) if title_node else ""
+
+    media_urls: List[str] = []
+    image_node = section.select_one("div.text-center img")
+    if image_node is not None and image_node.get("src"):
+        media_urls.append(image_node["src"])
+
+    return {
+        "title": title,
+        "body": body,
+        "author": author,
+        "media_urls": media_urls,
+        "timestamp": timestamp,
+    }
+
+
 # registrable domain -> deterministic extractor(html, url) -> result | None
 _DOMAIN_EXTRACTORS: Dict[str, Callable[[str, str], Optional[Dict[str, Any]]]] = {
     "oem.com.mx": _extract_oem,
+    "revvialibre.com.mx": _extract_revvialibre,
 }
 
 
@@ -505,8 +586,32 @@ def _fill_from_newspaper(result: Dict[str, Any], html: str, url: str) -> None:
         logger.warning("newspaper fill failed for %s: %s", url, ex)
 
 
+def _visible_text_length(html: str) -> int:
+    """Rough count of the human-readable characters in an HTML document."""
+    stripped = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", html or "")
+    stripped = re.sub(r"(?s)<[^>]+>", " ", stripped)
+    return len(re.sub(r"\s+", " ", stripped).strip())
+
+
 def _parse_with_llm(html: str, url: str, override: bool = False) -> Optional[Dict[str, Any]]:
-    """Last-resort: ask an LLM to extract article content from truncated HTML."""
+    """Last-resort: ask an LLM to extract article content from truncated HTML.
+
+    Refuses to run on a page with no readable text: given a contentless stub
+    (a redirect interstitial, an error page, a JS shell) the model does not
+    return null — it *invents* an article. A t.co interstitial produced a
+    fully-formed "Biden administration announces new student loan forgiveness
+    plan" that would have been published under the shortener's URL. Nothing to
+    read means nothing to extract, so return None and let the caller fail
+    honestly.
+    """
+    if _visible_text_length(html) < MIN_BODY_LENGTH:
+        logger.warning(
+            "Skipping LLM tier for %s — only %d chars of visible text (contentless page)",
+            url,
+            _visible_text_length(html),
+        )
+        return None
+
     try:
         from src.oai.llm_core import llm_cached_call, parse_json_response, get_text_content
         from src.helpers.html_cleaner import clean_html
