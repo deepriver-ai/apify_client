@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 from src.actors.actor import PERIOD_DAYS, ApifyActor
 from src.actors.facebook.comments import FacebookCommentsActor
+from src.actors.facebook.posts import append_image_text
 from src.actors.facebook.profiles import FacebookProfileActor, index_profiles_by_page_name
 from src.models.facebook_post import FacebookPost, _extract_facebook_page_name
 
@@ -105,6 +106,9 @@ class FacebookKeywordSearchActor(ApifyActor):
             for doc in documents:
                 external_url = doc._raw.get("external_url")
                 doc.fetch_attached_url(url=external_url)
+        # Free (reads media[].ocrText when the search actor returns it); no-op otherwise.
+        if kwargs.get("add_text_from_images", True):
+            append_image_text(documents)
         return documents
 
     def _filter_llm(self, documents: List, **kwargs) -> List:

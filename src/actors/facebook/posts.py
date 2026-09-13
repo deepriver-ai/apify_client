@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.actors.actor import ApifyActor, PERIOD_DAYS
 from src.actors.facebook.comments import FacebookCommentsActor
@@ -14,6 +15,68 @@ from src.models.post import _extract_first_external_url
 # https://apify.com/apify/facebook-posts-scraper
 
 logger = logging.getLogger(__name__)
+
+# Facebook's own alt-text carries the embedded image text as
+# "May be a graphic/illustration/image of … text that says '<TEXT>'". Only the
+# quoted <TEXT> is content; the wrapper (and wrappers without a quote) is not.
+_OCR_QUOTED_TEXT_RE = re.compile(
+    r"text that says\s*['\"\u2018\u2019\u201c\u201d]?\s*(?P<text>.+?)\s*['\"\u2018\u2019\u201c\u201d]?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_OCR_WRAPPER_PREFIXES = ("may be a ", "may be an ")
+_OCR_JUNK = ("no photo description available",)
+_OCR_INVISIBLE = ("\u200e", "\u200f", "\u200b")
+
+
+def extract_ocr_text(ocr_text: Optional[str]) -> Optional[str]:
+    """Return the usable text inside a Facebook ``ocrText`` value, or ``None``.
+
+    - ``"May be an image of map and text that says 'HORARIOS…'"`` → ``"HORARIOS…"``
+    - ``"May be an image of dog and text"`` (wrapper, no quoted text) → ``None``
+    - ``"No photo description available."`` → ``None``
+    - anything else (a plain OCR string) is returned stripped.
+    """
+    if not ocr_text:
+        return None
+    text = ocr_text
+    for ch in _OCR_INVISIBLE:
+        text = text.replace(ch, "")
+    text = text.strip()
+    lowered = text.lower()
+    if not text or lowered.startswith(_OCR_JUNK):
+        return None
+    match = _OCR_QUOTED_TEXT_RE.search(text)
+    if match:
+        text = match.group("text").strip().strip("'\"\u2018\u2019\u201c\u201d").strip()
+        return text or None
+    if lowered.startswith(_OCR_WRAPPER_PREFIXES):
+        return None
+    return text
+
+
+def append_image_text(documents: List) -> int:
+    """Append each post's usable ``media[].ocrText`` to its body as ``image_text_N``.
+
+    Free: the Facebook scrapers already return ``ocrText`` with every media item;
+    this only reads the raw response. Returns the number of posts changed.
+    """
+    changed = 0
+    for doc in documents:
+        raw_media = (getattr(doc, "_raw", None) or {}).get("media") or []
+        if not raw_media:
+            continue
+        body = doc.data.get("body") or ""
+        ocr_index = 0
+        for m in raw_media:
+            ocr_text = extract_ocr_text((m or {}).get("ocrText"))
+            if ocr_text:
+                ocr_index += 1
+                body += f"\n\n image_text_{ocr_index}: {ocr_text}"
+        if ocr_index > 0:
+            doc.data["body"] = body
+            changed += 1
+            logger.info("Added %d image text(s) to post %s", ocr_index, doc.data.get("url", ""))
+    return changed
 
 
 class FacebookPagePostsActor(ApifyActor):
@@ -107,7 +170,7 @@ class FacebookPagePostsActor(ApifyActor):
             self._download_images(documents, **kwargs)
         if kwargs.get("download_video"):
             self._download_video(documents, **kwargs)
-        if kwargs.get("add_text_from_images"):
+        if kwargs.get("add_text_from_images", True):
             self._add_text_from_images(documents, **kwargs)
         if kwargs.get("add_subtitles"):
             self._add_subtitles(documents, **kwargs)
@@ -130,26 +193,15 @@ class FacebookPagePostsActor(ApifyActor):
         )
 
     def _add_text_from_images(self, documents: List, **kwargs) -> List:
-        """Append OCR text from Facebook media ocrText fields to post body.
+        """Append the text embedded in post images to the body (on by default).
 
-        The Facebook scraper already returns OCR text in media[].ocrText.
-        Appends each non-trivial OCR result as ``\\n\\n image_text_N: <text>``.
-        Skips generic descriptions like "May be an image of".
+        The Facebook scraper already returns Facebook's alt-text in
+        ``media[].ocrText``; ``extract_ocr_text`` keeps only the quoted
+        ``text that says '…'`` part and drops wrappers/junk. Appends each usable
+        result as ``\\n\\n image_text_N: <text>``. Pass
+        ``add_text_from_images=False`` (``actor_params``) to disable.
         """
-        for doc in documents:
-            raw_media = doc._raw.get("media", [])
-            if not raw_media:
-                continue
-            body = doc.data.get("body") or ""
-            ocr_index = 0
-            for m in raw_media:
-                ocr_text = m.get("ocrText")
-                if ocr_text and not ocr_text.startswith("May be an image of"):
-                    ocr_index += 1
-                    body += f"\n\n image_text_{ocr_index}: {ocr_text}"
-            if ocr_index > 0:
-                doc.data["body"] = body
-                logger.info("Added %d OCR text(s) to post %s", ocr_index, doc.data.get("url", ""))
+        append_image_text(documents)
         return documents
 
     def _add_subtitles(self, documents: List, **kwargs) -> List:

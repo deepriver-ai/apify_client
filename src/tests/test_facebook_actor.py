@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.actors.facebook.comments import FacebookCommentsActor
-from src.actors.facebook.posts import FacebookPagePostsActor
+from src.actors.facebook.posts import FacebookPagePostsActor, extract_ocr_text
 from src.actors.facebook.profiles import FacebookProfileActor
 from src.models.facebook_post import FacebookPost
 
@@ -140,12 +140,48 @@ class TestAddTextFromImages:
         actor._add_text_from_images([post])
         assert "\n\n image_text_1: Important text from image" in post.data["body"]
 
-    def test_skips_generic_ocr(self, actor, sample_facebook_posts_results):
-        """OCR starting with 'May be an image of' should be skipped."""
-        post = FacebookPost.from_facebook(sample_facebook_posts_results[2])
-        original_body = post.data["body"]
+    def test_skips_wrapper_without_quoted_text(self, actor):
+        """Alt-text wrappers with no quoted text carry no content and are skipped."""
+        post = FacebookPost(data=FacebookPost._empty_data(), raw={
+            "media": [{"ocrText": "May be an image of dog and text"},
+                      {"ocrText": "No photo description available."}]
+        })
+        post.data["body"] = "caption"
         actor._add_text_from_images([post])
-        assert post.data["body"] == original_body
+        assert post.data["body"] == "caption"
+
+    def test_extracts_quoted_text_from_wrapper(self, actor):
+        """The real image text lives inside "…text that says '<TEXT>'" — keep only <TEXT>."""
+        post = FacebookPost(data=FacebookPost._empty_data(), raw={
+            "media": [{"ocrText": "May be an image of map and text that says 'HORARIOS DE CIERRE 2 AL 18 DE ABRIL'"}]
+        })
+        post.data["body"] = "caption"
+        actor._add_text_from_images([post])
+        assert post.data["body"] == "caption\n\n image_text_1: HORARIOS DE CIERRE 2 AL 18 DE ABRIL"
+
+    def test_sample_quoted_text_is_extracted(self, actor, sample_facebook_posts_results):
+        """On the real sample, exactly the posts with quoted alt-text gain image_text."""
+        posts = [FacebookPost.from_facebook(item) for item in sample_facebook_posts_results]
+        actor._add_text_from_images(posts)
+        with_text = [p for p in posts if "image_text_" in (p.data["body"] or "")]
+        assert with_text, "sample carries at least one quoted ocrText"
+        for p in with_text:
+            assert "May be an image" not in p.data["body"].split("image_text_1:")[1]
+
+    def test_enrich_content_appends_by_default(self, actor):
+        """add_text_from_images is on by default; explicit False disables it."""
+        def make():
+            p = FacebookPost(data=FacebookPost._empty_data(), raw={
+                "media": [{"ocrText": "May be a graphic of text that says 'SE BUSCA PERRO'"}]
+            })
+            p.data["body"] = "caption"
+            return p
+        on = make()
+        actor._enrich_content([on])
+        assert "image_text_1: SE BUSCA PERRO" in on.data["body"]
+        off = make()
+        actor._enrich_content([off], add_text_from_images=False)
+        assert off.data["body"] == "caption"
 
     def test_multiple_ocr_indexed(self, actor):
         """Multiple OCR texts should be indexed as image_text_1, image_text_2, etc."""
@@ -166,6 +202,24 @@ class TestAddTextFromImages:
         post.data["body"] = "caption"
         actor._add_text_from_images([post])
         assert post.data["body"] == "caption"
+
+
+class TestExtractOcrText:
+    """extract_ocr_text: quoted alt-text → text; wrappers/junk → None; plain OCR kept."""
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("May be an image of map and text that says 'QUERÉTARO SEMANA 02 AL 18'", "QUERÉTARO SEMANA 02 AL 18"),
+        ("May be a graphic of text that says \u201cFESTIVAL 30 DE ABRIL\u201d", "FESTIVAL 30 DE ABRIL"),
+        ("May be an image of \u200etext that says '\u200eGOL GOAL CONSIGUE TUS BOLETOS EN: ", "GOL GOAL CONSIGUE TUS BOLETOS EN:"),
+        ("May be an image of dog and text", None),
+        ("May be an illustration of 3 people", None),
+        ("No photo description available.", None),
+        ("", None),
+        (None, None),
+        ("Important text from image", "Important text from image"),
+    ])
+    def test_cases(self, raw, expected):
+        assert extract_ocr_text(raw) == expected
 
 
 class TestFinalSchema:
