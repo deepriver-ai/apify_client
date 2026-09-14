@@ -27,6 +27,7 @@ CURRENT_THEME = "mc"
 CURRENT_THEME = "zona_fest"
 CURRENT_THEME = "sjdr"
 CURRENT_THEME = "totalenergies"
+CURRENT_THEME = "morelia_descifra"
 
 # Global override: when True, dismiss the cached filtered-out documents for every
 # task (all actors), re-running all filters from scratch regardless of each task's
