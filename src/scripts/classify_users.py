@@ -1099,6 +1099,37 @@ def write_report(accounts: Dict[str, Account], model: Optional[str],
     return path
 
 
+def fill_from_users_cache(accounts: Dict[str, Account]) -> int:
+    """Post authors missing a bio / followers in ES take them from the users cache
+    (``UsersManagement``, filled by the ingestion actors' ``enrich_followers`` and by
+    ``scripts/enrich_page_bios.py``). Returns how many accounts were filled."""
+    try:
+        from src.models.users_management import UsersManagement
+        um = UsersManagement()
+    except Exception as exc:                       # cache unreadable → no enrichment
+        logger.warning("users cache unavailable (%s)", exc)
+        return 0
+    filled = 0
+    for acc in accounts.values():
+        if acc.tier != "profile" or not acc.profile_url or (acc.bio and acc.followers is not None):
+            continue
+        # The cache is keyed by the url as scraped (scheme + www); the account
+        # carries the normalized form (no scheme, no www) — try both spellings.
+        bare = acc.profile_url
+        candidates = [bare, "https://" + bare, "https://www." + bare,
+                      "https://" + bare.replace("facebook.com/", "www.facebook.com/", 1)]
+        st = next((x for x in (um.get_stats(c) for c in candidates) if x), None)
+        if not st:
+            continue
+        changed = False
+        if not acc.bio and st.get("author_profile_bio"):
+            acc.bio = st["author_profile_bio"]; changed = True
+        if acc.followers is None and st.get("website_visits") not in (None, 0):
+            acc.followers = st["website_visits"]; changed = True
+        filled += changed
+    return filled
+
+
 # --- Orchestration ----------------------------------------------------------
 
 def run(args: argparse.Namespace) -> Dict[str, Any]:
@@ -1116,6 +1147,9 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     accounts, page_post_counts = harvest_evidence(es, args.pages, args.networks, args.days,
                                                   phrases=args.phrases)
     logger.info("Harvested %d accounts", len(accounts))
+    filled = fill_from_users_cache(accounts)
+    if filled:
+        logger.info("Bios/followers filled from the users cache for %d post authors", filled)
 
     logger.info("Stage B: computing deterministic features ...")
     for acc in accounts.values():

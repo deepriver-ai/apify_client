@@ -232,6 +232,17 @@ class TestDeterministicMapping:
         assert (pol.classification, par.classification, med.classification) == ("politico", "partido", "medio")
         assert med.alcance == "local"
 
+    def test_users_cache_fills_bio_across_url_spellings(self):
+        key = account_id(TIER_PROFILE, profile_url="https://www.facebook.com/PaginaX/")
+        acc = Account(tier=TIER_PROFILE, network="facebook", display_name="Pagina X",
+                      key=key, profile_url="facebook.com/paginax", n_posts=1)
+        fake = MagicMock()
+        fake.get_stats.side_effect = lambda u: ({"author_profile_bio": "Portal de noticias", "website_visits": 12}
+                                                if u == "https://www.facebook.com/paginax" else None)
+        with patch("src.models.users_management.UsersManagement", return_value=fake):
+            n = cu.fill_from_users_cache({acc.key: acc})
+        assert n == 1 and acc.bio == "Portal de noticias" and acc.followers == 12
+
     def test_own_name_seed_beats_pages_seed(self):
         """A politician's profile that also posts on an institution page is the politician."""
         acc = make_comment_account("Alfonso Martinez Alcazar", []); acc.n_posts = 25
