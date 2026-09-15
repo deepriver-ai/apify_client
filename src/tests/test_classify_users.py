@@ -261,15 +261,21 @@ class TestDeterministicMapping:
         good = lambda n: [{"i": i + 1, "classification": "empresa", "confidence": 0.9} for i in range(n)]
         calls = []
 
+        keys = []
+
         def fake(cache_tag, request_id, cache_field, messages_builder, parse_fn, override, fallback_fn):
-            n = len(json.loads(request_id_to_n[request_id])) if False else None
-            calls.append(override)
-            return fallback if not override else good(2)
-        request_id_to_n = {}
-        with patch("src.oai.llm_core.llm_cached_call", side_effect=fake):
+            keys.append(request_id)
+            calls.append(len(json.loads(messages_builder()[1]["content"].count("] nombre:") and "[]") or []) or None)
+            # the full batch (4 names) fails; the halves (2 names each) succeed
+            n = messages_builder()[1]["content"].count("] nombre:")
+            return fallback if n == 4 else good(n)
+        written = {}
+        with patch("src.oai.llm_core.llm_cached_call", side_effect=fake), \
+             patch("src.oai.llm_core.cache_set", side_effect=lambda tag, rid, field, value: written.update({rid: value})):
             out = cu.llm_classify_batch(batch)
         assert len(out) == 4 and all(o["classification"] == "empresa" for o in out)
-        assert calls == [False, True, True]
+        assert len(keys) == 3 and len(set(keys)) == 3          # batch + two halves, distinct keys
+        assert list(written) == [keys[0]] and len(written[keys[0]]) == 4   # combined answer cached under the batch key
 
     def test_llm_v1_answer_is_upgraded_and_attrs_validated(self):
         acc = make_comment_account("Portal X", ["a", "b"])

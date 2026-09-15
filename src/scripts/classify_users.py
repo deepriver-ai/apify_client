@@ -129,9 +129,13 @@ class Account:
             self.latest_ts = str(ts)
 
     def texts(self) -> List[str]:
-        """All verbatim texts (comments first — they carry the automation signal)."""
-        return [c["text"] for c in self.comment_items if c.get("text")] + \
-               [t for t in self.post_texts if t]
+        """All verbatim texts (comments first — they carry the automation signal),
+        in a deterministic order (timestamp, then text): the harvest follows the ES
+        scan order, which varies run to run and would change the LLM cache key and
+        the prompt (2026-09-14)."""
+        comments = sorted((c for c in self.comment_items if c.get("text")),
+                          key=lambda c: (str(c.get("timestamp") or ""), c["text"]))
+        return [c["text"] for c in comments] + sorted(t for t in self.post_texts if t)
 
 
 # --- Stage A: harvest evidence from Elasticsearch ---------------------------
@@ -345,7 +349,12 @@ def compute_features(acc: Account, official_pages: Optional[List[str]] = None,
                      page_post_counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """Stage B. Pure-Python activity, repetition, engagement, burstiness and
     name-shape features for one account. No LLM, no embeddings."""
-    comment_texts = [c["text"] for c in acc.comment_items if c.get("text")]
+    # Deterministic order (timestamp, text): the scan order varies run to run and
+    # SequenceMatcher.ratio() is not symmetric, so an order-dependent sample made
+    # mean_pairwise_similarity — and with it the LLM cache key — drift (2026-09-14).
+    ordered_items = sorted((c for c in acc.comment_items if c.get("text")),
+                           key=lambda c: (str(c.get("timestamp") or ""), c["text"]))
+    comment_texts = [c["text"] for c in ordered_items]
     norm_texts = [_norm_text(t) for t in comment_texts if _norm_text(t)]
 
     # Repetition: largest cluster of identical (normalized) comments.
@@ -374,8 +383,8 @@ def compute_features(acc: Account, official_pages: Optional[List[str]] = None,
     # texts at NEAR_DUP_RATIO and track the largest cluster and how many
     # distinct pages/posts it spans. Pairs with texts and page/post context.
     eligible = [( _norm_text(c["text"]), c.get("page"), c.get("parent_doc_id"))
-                for c in acc.comment_items
-                if c.get("text") and len(_norm_text(c["text"])) >= NEAR_DUP_MIN_LEN]
+                for c in ordered_items
+                if len(_norm_text(c["text"])) >= NEAR_DUP_MIN_LEN]
     eligible = eligible[:SIMILARITY_SAMPLE_CAP]
     near_dup = 0
     near_dup_pages = 0
@@ -920,14 +929,21 @@ def llm_classify_batch(batch: List[Account], override: bool = False,
         fallback_fn=fallback_fn,
     )
     # A malformed answer used to sink the whole batch into the fallback
-    # (2026-09-14: two runs, one batch each). Retry the halves with a fresh call
-    # instead; a single account that still fails keeps the fallback.
+    # (2026-09-14: two runs, one batch each). Retry the halves instead — each
+    # half has its own cache key, so it is called once and cached — and write
+    # the combined answer back under the batch key, so the next run finds a
+    # good value and never re-calls. A single account that still fails keeps
+    # the fallback.
     if _is_parse_fallback(result) and len(batch) > 1 and not _retrying:
+        from src.oai.llm_core import cache_set
         mid = len(batch) // 2
         logger.warning("classify batch of %d failed to parse — retrying in halves", len(batch))
-        left = llm_classify_batch(batch[:mid], override=True, model=model, _retrying=len(batch) <= 2)
-        right = llm_classify_batch(batch[mid:], override=True, model=model, _retrying=len(batch) <= 2)
-        return left + right
+        left = llm_classify_batch(batch[:mid], model=model, _retrying=len(batch) <= 2)
+        right = llm_classify_batch(batch[mid:], model=model, _retrying=len(batch) <= 2)
+        combined = left + right
+        if not _is_parse_fallback(left) and not _is_parse_fallback(right):
+            cache_set(f"classify_users_{CLASSIFIER_VERSION}", cache_key, "classifications", combined)
+        return combined
     return result
 
 
@@ -1024,6 +1040,11 @@ def classify_accounts(
 
         pending.append(acc)
 
+    # Deterministic batches: the harvest order follows the ES scan, which is not
+    # stable run to run; a different batch context changes both the cache key
+    # and the model's answer (18 accounts flipped between two otherwise identical
+    # runs, 2026-09-14). Sort by account key before batching.
+    pending.sort(key=lambda a: a.key)
     llm_calls = 0
     for start in range(0, len(pending), LLM_BATCH_SIZE):
         batch = pending[start:start + LLM_BATCH_SIZE]
