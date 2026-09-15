@@ -162,8 +162,12 @@ def cache_set(cache_tag: str, request_id: Any, cache_field: str, value: Any) -> 
 
 
 def parse_json_response(content: str) -> Any:
-    """Parse a JSON response from the LLM, handling common formatting issues."""
-    return json.loads(content.replace('`', '').replace('json', ''))
+    """Parse a JSON response from the LLM, handling common formatting issues.
+
+    ``strict=False`` accepts raw control characters (newlines, tabs) inside JSON
+    strings — models echo multi-line evidence verbatim and a whole batch used to
+    fail on one such character (classify_users, 2026-09-14)."""
+    return json.loads(content.replace('`', '').replace('json', ''), strict=False)
 
 
 def get_text_content(response) -> str:

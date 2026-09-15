@@ -14,12 +14,16 @@ Two-tier identity (one document per account):
   and accent-stripped. Display-name identity is best-effort, so records on this
   tier carry a lower ``identity_confidence`` ceiling.
 
-The **classifier** assigns one of the closed-vocabulary classes
-(``organico``, ``pagina_oficial``, ``politico``, ``comunidad``, ``sitio_local``,
-``sitio_estatal``, ``sitio_nacional``). ``bot`` and ``influencer`` are NOT stored
-classes — per ``reports/event_report/docs/social_report_design.md`` §1 they are
-derived at read time from ``automation_score`` / ``followers`` against tunable,
-per-market thresholds.
+The **classifier** assigns one of the closed-vocabulary classes (taxonomy v2,
+2026-09-14): ``ciudadano``, ``figura_publica``, ``politico``, ``partido``,
+``institucion``, ``organizacion``, ``empresa``, ``medio``, ``comunidad``, plus the
+attributes ``nivel_gobierno`` (politico / institucion), ``partido`` (politico /
+partido) and ``alcance`` (medio), and the account ``bio`` when the platform exposes
+one. ``bot`` and ``influencer`` are NOT stored classes — per
+``reports/event_report/docs/social_report_design.md`` §1 they are derived at read
+time from ``automation_score`` / ``followers`` against tunable, per-market
+thresholds. Records written by the v1 classifier (``organico``, ``pagina_oficial``,
+``sitio_*`` …) are upgraded at read time by ``upgrade_record``.
 
 The collection lives in the same Mongo database that holds ``CrawlersAll``
 (name from ``MONGO_DB_NEWS_SOURCES``), reusing ``src/helpers/mongoconnection.py``.
@@ -37,17 +41,56 @@ logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "SocialUsers"
 
-# Closed classifier vocabulary (see social_report_design.md §1). bot/influencer
+# Closed classifier vocabulary v2 (see social_report_design.md §1). bot/influencer
 # are intentionally absent — they are derived at read time by the report builders.
 CLASSIFIER_CLASSES = (
-    "organico",
-    "pagina_oficial",
-    "politico",
-    "comunidad",
-    "sitio_local",
-    "sitio_estatal",
-    "sitio_nacional",
+    "ciudadano",        # real individual person, not a public figure
+    "figura_publica",   # journalist, columnist, activist, artist, creator — not in office
+    "politico",         # person holding or seeking office, or a party official (attr: nivel_gobierno, partido)
+    "partido",          # party, coalition, campaign or movement account (attr: partido)
+    "institucion",      # government or public-institution account (attr: nivel_gobierno)
+    "organizacion",     # collective, union, NGO, neighbourhood association, church, school
+    "empresa",          # business or brand
+    "medio",            # news outlet operating as a social account (attr: alcance)
+    "comunidad",        # community / neighbourhood / denuncia page
 )
+DEFAULT_CLASS = "ciudadano"
+# Classes whose voice counts as organic conversation in the reports.
+ORGANIC_CLASSES = ("ciudadano", "comunidad")
+NIVELES_GOBIERNO = ("municipal", "estatal", "federal")
+ALCANCES_MEDIO = ("local", "estatal", "nacional")
+
+# v1 (2026-07) → v2 mapping, applied at read time to stored records and reports.
+V1_TO_V2 = {
+    "organico": ("ciudadano", {}),
+    "pagina_oficial": ("institucion", {}),
+    "politico": ("politico", {}),
+    "comunidad": ("comunidad", {}),
+    "sitio_local": ("medio", {"alcance": "local"}),
+    "sitio_estatal": ("medio", {"alcance": "estatal"}),
+    "sitio_nacional": ("medio", {"alcance": "nacional"}),
+}
+
+
+def upgrade_record(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return a copy of a stored/report record in the v2 vocabulary.
+
+    v2 records pass through; v1 classes are mapped with ``V1_TO_V2`` (``sitio_*``
+    becomes ``medio`` with its ``alcance``). Missing attribute keys are added as
+    None so consumers can rely on them."""
+    if not isinstance(record, dict):
+        return record
+    rec = dict(record)
+    cls = rec.get("classification")
+    if cls in V1_TO_V2:
+        new_cls, attrs = V1_TO_V2[cls]
+        rec["classification_v1"] = cls
+        rec["classification"] = new_cls
+        for k, v in attrs.items():
+            rec.setdefault(k, v)
+    for k in ("nivel_gobierno", "partido", "alcance", "bio"):
+        rec.setdefault(k, None)
+    return rec
 
 TIER_PROFILE = "profile"
 TIER_NAME = "name"
@@ -208,7 +251,7 @@ class SocialUsers:
         whose tells are profile-level are invisible to the feature pipeline).
 
         Consumers deriving a ``bot`` badge should ALSO exclude classes
-        ``pagina_oficial`` and ``sitio_*``: outlets and official pages post
+        ``institucion`` and ``medio`` (v1: ``pagina_oficial`` / ``sitio_*``): outlets and official pages post
         repetitively by nature (e.g. a newspaper account dropping its own
         links scores 0.8), which is automation but not a bot in the
         presented taxonomy (2026-07-21 media-scope validation)."""
@@ -244,8 +287,12 @@ def build_record(
     network: str,
     display_name: str,
     profile_url: Optional[str] = None,
-    classification: str = "organico",
+    classification: str = DEFAULT_CLASS,
     classification_confidence: float = 0.0,
+    nivel_gobierno: Optional[str] = None,
+    partido: Optional[str] = None,
+    alcance: Optional[str] = None,
+    bio: Optional[str] = None,
     automation_score: float = 0.0,
     automation_evidence: Optional[List[str]] = None,
     anonymity: float = 0.0,
@@ -272,9 +319,16 @@ def build_record(
         _id = account_id(TIER_NAME, network=network, name=display_name)
         normalized_name = normalize_name(display_name)
 
+    if classification in V1_TO_V2:
+        classification, attrs = V1_TO_V2[classification]
+        alcance = alcance or attrs.get("alcance")
     if classification not in CLASSIFIER_CLASSES:
-        logger.warning("Coercing unknown classification %r to 'organico'", classification)
-        classification = "organico"
+        logger.warning("Coercing unknown classification %r to %r", classification, DEFAULT_CLASS)
+        classification = DEFAULT_CLASS
+    if nivel_gobierno not in NIVELES_GOBIERNO:
+        nivel_gobierno = None
+    if alcance not in ALCANCES_MEDIO:
+        alcance = None
 
     return {
         "_id": _id,
@@ -285,6 +339,10 @@ def build_record(
         "display_name": display_name,
         "identity_confidence": IDENTITY_CONFIDENCE.get(tier, 0.5),
         "classification": classification,
+        "nivel_gobierno": nivel_gobierno,
+        "partido": (partido or None),
+        "alcance": alcance,
+        "bio": (" ".join(str(bio).split())[:500] if bio else None),
         "classification_confidence": round(float(classification_confidence), 3),
         "automation_score": round(float(automation_score), 3),
         "automation_evidence": automation_evidence or [],

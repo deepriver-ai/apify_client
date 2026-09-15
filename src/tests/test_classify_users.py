@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import json
 import pytest
 
 from src.scripts import classify_users as cu
@@ -111,16 +112,28 @@ class TestMinActivityGate:
         mock_llm.assert_not_called()
         assert calls == 0
         for a in accounts.values():
-            assert a.classification == "organico"
+            assert a.classification == "ciudadano"
             assert a.confidence <= 0.2
             assert not a.llm_used
+
+    def test_post_author_bypasses_gate(self):
+        """A page that published once is still classified (it carries the bio)."""
+        acc = make_comment_account("Portal Nuevo", [])
+        acc.n_posts, acc.bio = 1, "Noticias de la región"
+        acc.features = cu.compute_features(acc)
+        canned = [{"i": 1, "classification": "medio", "alcance": "local", "confidence": 0.9}]
+        with patch.object(cu, "llm_classify_batch", return_value=canned) as mock_llm:
+            cu.classify_accounts({acc.key: acc}, min_activity=2, official_pages=[])
+        mock_llm.assert_called_once()
+        assert acc.classification == "medio" and acc.alcance == "local"
 
     def test_active_account_reaches_llm(self):
         acc = make_comment_account("Persona Activa", ["a", "b", "c"])
         acc.features = cu.compute_features(acc)
         accounts = {acc.key: acc}
 
-        canned = [{"i": 1, "classification": "politico", "automation_score": 0.1,
+        canned = [{"i": 1, "classification": "politico", "nivel_gobierno": "municipal",
+                   "partido": "Morena", "alcance": "local", "automation_score": 0.1,
                    "anonymity": 0.2, "confidence": 0.8, "evidence": ["es candidato"]}]
         with patch.object(cu, "llm_classify_batch", return_value=canned) as mock_llm:
             calls = cu.classify_accounts(accounts, min_activity=2, official_pages=[])
@@ -128,6 +141,8 @@ class TestMinActivityGate:
         mock_llm.assert_called_once()
         assert calls == 1
         assert acc.classification == "politico"
+        assert acc.nivel_gobierno == "municipal" and acc.partido == "Morena"
+        assert acc.alcance is None          # alcance only applies to medio
         assert acc.confidence == 0.8
         assert acc.llm_used
 
@@ -146,10 +161,10 @@ class TestDeterministicMapping:
 
         mock_llm.assert_not_called()
         assert calls == 0
-        assert acc.classification == "pagina_oficial"
+        assert acc.classification == "institucion"
 
     def test_commenter_on_official_page_not_flagged_official(self):
-        """A commenter ON an official page must not inherit pagina_oficial."""
+        """A commenter ON an official page must not inherit institucion."""
         acc = make_comment_account("Vecino Molesto", ["x", "y"])
         acc.pages = {"Presidencia Municipal"}  # page they commented on
         acc.features = cu.compute_features(acc)
@@ -168,7 +183,7 @@ class TestDeterministicMapping:
         result = cu.deterministic_classification(
             acc, official_pages_norm={"presidencia municipal"},
         )
-        assert result is not None and result[0] == "pagina_oficial"
+        assert result is not None and result[0] == "institucion"
 
     def test_known_outlet_domain_bypasses_llm(self):
         # Profile-tier account whose URL resolves to a known news-source domain.
@@ -190,13 +205,83 @@ class TestDeterministicMapping:
 
         mock_llm.assert_not_called()
         assert calls == 0
-        assert acc.classification == "sitio_local"
+        assert acc.classification == "medio"
+        assert acc.alcance == "local"
 
-    def test_precision_to_sitio_levels(self):
-        assert cu._precision_to_sitio(3) == "sitio_local"
-        assert cu._precision_to_sitio(2) == "sitio_estatal"
-        assert cu._precision_to_sitio(1) == "sitio_nacional"
-        assert cu._precision_to_sitio(None) == "sitio_nacional"
+    def test_precision_to_alcance_levels(self):
+        assert cu._precision_to_alcance(3) == "local"
+        assert cu._precision_to_alcance(2) == "estatal"
+        assert cu._precision_to_alcance(1) == "nacional"
+        assert cu._precision_to_alcance(None) == "nacional"
+        assert cu._precision_to_sitio(3) == "sitio_local"   # v1 name kept
+
+    def test_seeded_politician_party_media_pages(self):
+        pol = make_comment_account("Alfonso Martinez Alcazar", ["x", "y"]); pol.n_posts = 1
+        pol.pages = {"Alfonso Martínez Alcázar"}
+        par = make_comment_account("Morena Si Michoacan", ["x", "y"]); par.n_posts = 1
+        med = make_comment_account("MiMorelia.com", ["x", "y"]); med.n_posts = 1
+        accounts = {a.key: a for a in (pol, par, med)}
+        for a in accounts.values():
+            a.features = cu.compute_features(a)
+        with patch.object(cu, "llm_classify_batch") as mock_llm:
+            cu.classify_accounts(accounts, min_activity=2, official_pages=[],
+                                 politician_pages=["Alfonso Martínez Alcázar"],
+                                 party_pages=["Morena Sí Michoacán"],
+                                 media_pages=["MiMorelia.com"])
+        mock_llm.assert_not_called()
+        assert (pol.classification, par.classification, med.classification) == ("politico", "partido", "medio")
+        assert med.alcance == "local"
+
+    def test_own_name_seed_beats_pages_seed(self):
+        """A politician's profile that also posts on an institution page is the politician."""
+        acc = make_comment_account("Alfonso Martinez Alcazar", []); acc.n_posts = 25
+        acc.pages = {"Alfonso Martínez Alcázar", "Secretaría de Desarrollo Urbano"}
+        r = cu.deterministic_classification(
+            acc, official_pages_norm={"secretaria de desarrollo urbano"},
+            politician_pages_norm={"alfonso martinez alcazar"})
+        assert r is not None and r[0] == "politico"
+
+    def test_parse_fallback_retries_in_halves(self):
+        batch = [make_comment_account(f"Cuenta {i}", ["a", "b"]) for i in range(4)]
+        for a in batch:
+            a.features = {}
+        fallback = [{"i": i + 1, "classification": "ciudadano", "evidence": ["fallback: parse error"]}
+                    for i in range(4)]
+        good = lambda n: [{"i": i + 1, "classification": "empresa", "confidence": 0.9} for i in range(n)]
+        calls = []
+
+        def fake(cache_tag, request_id, cache_field, messages_builder, parse_fn, override, fallback_fn):
+            n = len(json.loads(request_id_to_n[request_id])) if False else None
+            calls.append(override)
+            return fallback if not override else good(2)
+        request_id_to_n = {}
+        with patch("src.oai.llm_core.llm_cached_call", side_effect=fake):
+            out = cu.llm_classify_batch(batch)
+        assert len(out) == 4 and all(o["classification"] == "empresa" for o in out)
+        assert calls == [False, True, True]
+
+    def test_llm_v1_answer_is_upgraded_and_attrs_validated(self):
+        acc = make_comment_account("Portal X", ["a", "b"])
+        cu._validate_llm_result({"classification": "sitio_estatal", "nivel_gobierno": "municipal",
+                                 "confidence": 0.9}, acc)
+        assert acc.classification == "medio" and acc.alcance == "estatal"
+        assert acc.nivel_gobierno is None                     # not a politico/institucion
+        cu._validate_llm_result({"classification": "institucion", "nivel_gobierno": "galactico"}, acc)
+        assert acc.classification == "institucion" and acc.nivel_gobierno is None
+        cu._validate_llm_result({"classification": "bot"}, acc)
+        assert acc.classification == "ciudadano"
+
+    def test_bio_reaches_prompt_and_cache_key(self):
+        a = make_comment_account("Cuenta Con Bio", ["a", "b"]); a.features = {}
+        b = make_comment_account("Cuenta Con Bio", ["a", "b"]); b.features = {}
+        a.bio = "Diputado local del Distrito 16"
+        prompt_a = cu.build_llm_prompt([a])[1]["content"]
+        prompt_b = cu.build_llm_prompt([b])[1]["content"]
+        assert "bio: Diputado local del Distrito 16" in prompt_a
+        assert "bio: (no disponible)" in prompt_b
+        key = lambda x: hash(json.dumps([(x.display_name, x.network, x.bio, x.features,
+                                            x.texts()[:cu.LLM_SAMPLE_TEXTS])], sort_keys=True, default=str))
+        assert key(a) != key(b)
 
 
 class TestSentimentJoin:
@@ -363,11 +448,11 @@ def test_upsert_narrow_scope_does_not_shrink_history():
     store = SocialUsers(collection=MagicMock())
     rich = {"_id": "name:facebook:x", "n_comments": 16, "n_posts": 0,
             "pages_touched": ["Pagina A"], "evidence_as_of": "2026-07-20",
-            "classification": "organico"}
+            "classification": "ciudadano"}
     store.get = lambda _id: rich
     narrow = {"_id": "name:facebook:x", "n_comments": 2, "n_posts": 0,
               "pages_touched": ["Pagina B"], "evidence_as_of": "2026-07-21",
-              "classification": "organico"}
+              "classification": "ciudadano"}
     store.upsert(narrow)
     call = store.collection.update_one.call_args
     setdoc = call[0][1]["$set"]

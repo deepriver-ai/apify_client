@@ -12,7 +12,17 @@ Invocation::
         --pages "Roberto Cabrera Valencia" "Presidencia Municipal San Juan del Río" \
         [--networks facebook tiktok] [--days 60] \
         [--org 101 --entities 82 83] [--min-activity 2] \
-        [--official-pages "Roberto Cabrera Valencia"] [--apply]
+        [--official-pages "Presidencia Municipal San Juan del Río"] \
+        [--politician-pages "Roberto Cabrera Valencia"] [--party-pages "Morena Qro"] \
+        [--media-pages "El Sol de San Juan"] [--apply]
+
+Taxonomy v2 (2026-09-14, ``src/models/social_users.py``): ciudadano · figura_publica ·
+politico · partido · institucion · organizacion · empresa · medio · comunidad, with the
+attributes nivel_gobierno / partido / alcance. Evidence per account = name, network,
+followers, the platform **bio** (post authors: ``source.stats.author_profile_bio``),
+deterministic features and sample texts. The ``--*-pages`` lists seed the
+deterministic stage per scope (the customer's institutions, politicians, parties and
+outlets are known before any run); the sources catalogue seeds ``medio``.
 
 Default is a dry run: it prints a human-review table and writes a JSON report next
 to ``cache/`` but does NOT write to Mongo. Pass ``--apply`` to upsert.
@@ -43,7 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # Bump to invalidate cached LLM classifications after a prompt/feature change.
-CLASSIFIER_VERSION = "v1"
+CLASSIFIER_VERSION = "v2"
 
 # LLM cost gates / batching.
 LLM_BATCH_SIZE = 15
@@ -101,7 +111,10 @@ class Account:
     features: Dict[str, Any] = field(default_factory=dict)
     automation_score: float = 0.0
     automation_evidence: List[str] = field(default_factory=list)
-    classification: str = "organico"
+    classification: str = "ciudadano"
+    nivel_gobierno: Optional[str] = None
+    partido: Optional[str] = None
+    alcance: Optional[str] = None
     confidence: float = 0.0
     anonymity: float = 0.0
     evidence: List[str] = field(default_factory=list)
@@ -750,38 +763,57 @@ def apply_sentiment(accounts: Dict[str, Account],
 
 # --- Stage C: classification (deterministic bypass + cost-gated LLM) --------
 
-def _precision_to_sitio(precision_level: Any) -> str:
-    """Map a source's geocoding precision level to a sitio_* class."""
+def _precision_to_alcance(precision_level: Any) -> str:
+    """Map a source's geocoding precision level to a medio ``alcance``."""
     try:
         lvl = int(precision_level)
     except (ValueError, TypeError):
-        return "sitio_nacional"
+        return "nacional"
     if lvl >= 3:
-        return "sitio_local"
+        return "local"
     if lvl == 2:
-        return "sitio_estatal"
-    return "sitio_nacional"
+        return "estatal"
+    return "nacional"
+
+
+def _precision_to_sitio(precision_level: Any) -> str:
+    """v1 name kept for callers: ``sitio_<alcance>``."""
+    return "sitio_" + _precision_to_alcance(precision_level)
 
 
 def deterministic_classification(
     acc: Account,
     official_pages_norm: set,
     sources_mgr: Any = None,
-) -> Optional[Tuple[str, float, List[str]]]:
-    """Return (class, confidence, evidence) when the account can be classified
-    without the LLM: official pages → pagina_oficial; a name/URL that resolves to
-    a known news-source domain → sitio_* by outlet geography. Else None."""
+    politician_pages_norm: Optional[set] = None,
+    party_pages_norm: Optional[set] = None,
+    media_pages_norm: Optional[set] = None,
+) -> Optional[Tuple[str, float, List[str], Dict[str, Any]]]:
+    """Return (class, confidence, evidence, attrs) when the account can be classified
+    without the LLM: seeded institution / politician / party / outlet pages → their
+    class; a name/URL that resolves to a known news-source domain → medio with the
+    outlet's geography as ``alcance``. Else None."""
     from src.models.social_users import normalize_name
 
     # Match the display name; for post authors also match the page they post *as*
     # (a page's own posts carry author_full_name with a suffix, but source.name is
     # the clean page name and lands in acc.pages). Only post authors get the
     # page-name match — a commenter's acc.pages are pages they commented *on*.
-    names = {normalize_name(acc.display_name)}
-    if acc.n_posts > 0:
-        names |= {normalize_name(p) for p in acc.pages}
-    if names & official_pages_norm:
-        return ("pagina_oficial", 0.95, ["página marcada como oficial"])
+    # The account's own name decides first; the pages it posts as come second
+    # (a mayor's profile that also publishes on a secretariat page is the
+    # politician, not the institution — Morelia, 2026-09-14).
+    seeds = [
+        (politician_pages_norm or set(), "politico", "página marcada como político", {}),
+        (party_pages_norm or set(), "partido", "página marcada como partido", {}),
+        (official_pages_norm, "institucion", "página marcada como institución", {}),
+        (media_pages_norm or set(), "medio", "página marcada como medio", {"alcance": "local"}),
+    ]
+    own = {normalize_name(acc.display_name)}
+    pages = {normalize_name(p) for p in acc.pages} if acc.n_posts > 0 else set()
+    for names in (own, pages):
+        for seed, cls, why, attrs in seeds:
+            if seed and names & seed:
+                return (cls, 0.95, [why], dict(attrs))
 
     if sources_mgr is not None:
         candidate = acc.profile_url or acc.display_name
@@ -791,30 +823,47 @@ def deterministic_classification(
             domain = None
         if domain and sources_mgr.is_known(domain):
             loc = sources_mgr.get_location(domain) or {}
-            cls = _precision_to_sitio(loc.get("location_author_precision_level"))
-            return (cls, 0.9, [f"dominio de medio conocido: {domain}"])
+            alcance = _precision_to_alcance(loc.get("location_author_precision_level"))
+            return ("medio", 0.9, [f"dominio de medio conocido: {domain}"], {"alcance": alcance})
 
     return None
 
 
 def build_llm_prompt(batch: List[Account]) -> List[Dict[str, str]]:
-    """Spanish classification prompt for a batch of accounts."""
+    """Spanish classification prompt for a batch of accounts (taxonomy v2)."""
     from src.models.social_users import CLASSIFIER_CLASSES
 
     system = (
-        "Eres un analista de redes sociales. Clasifica cada CUENTA en UNA de estas "
-        "clases (vocabulario cerrado):\n"
-        "- organico: persona real individual\n"
-        "- pagina_oficial: página de gobierno, institución o marca oficial\n"
-        "- politico: político, partido o cuenta de campaña\n"
-        "- comunidad: página de comunidad, vecinal o de denuncia\n"
-        "- sitio_local / sitio_estatal / sitio_nacional: medio de noticias que opera como cuenta social\n\n"
+        "Eres un analista de conversación pública en redes sociales en México. Clasifica "
+        "cada CUENTA en UNA de estas clases (vocabulario cerrado):\n"
+        "- ciudadano: persona real individual que no es figura pública\n"
+        "- figura_publica: periodista, columnista, activista, artista, creador de contenido, "
+        "académico — persona conocida que NO ocupa ni busca un cargo\n"
+        "- politico: persona que ocupa o busca un cargo público (alcalde, regidor, diputado, "
+        "senador, gobernador, candidato) o dirigente de partido\n"
+        "- partido: cuenta de partido, coalición, campaña o movimiento político\n"
+        "- institucion: cuenta de gobierno o de una institución pública (ayuntamiento, "
+        "secretaría, policía, organismo, congreso, fiscalía, universidad pública)\n"
+        "- organizacion: colectivo, sindicato, ONG, asociación vecinal, iglesia, escuela, "
+        "cámara empresarial\n"
+        "- empresa: negocio o marca comercial\n"
+        "- medio: medio de noticias que opera como cuenta social (portal, periódico, radio, "
+        "TV, página de noticias)\n"
+        "- comunidad: página comunitaria, vecinal o de denuncia sin identidad institucional\n\n"
+        "Atributos: nivel_gobierno (municipal | estatal | federal | null) para politico e "
+        "institucion; partido (nombre del partido o null) para politico y partido; alcance "
+        "(local | estatal | nacional | null) para medio.\n\n"
+        "La BIO de la cuenta, cuando existe, es la evidencia principal (dice el cargo, la "
+        "institución, el medio o el negocio); el nombre y los textos son secundarios. Sin bio, "
+        "decide por el nombre y los textos y baja la confianza. En caso de duda entre ciudadano "
+        "y figura_publica, elige ciudadano.\n\n"
         "Para cada cuenta responde también automation_score (0-1, indicios de automatización: "
         "texto repetido, ráfagas), anonymity (0-1, sin nombre real/identidad verificable), "
         "confidence (0-1) y evidence (1-2 frases cortas).\n\n"
         "Responde SOLO con un arreglo JSON, un objeto por cuenta EN ORDEN, con la forma: "
-        '[{"i": 1, "classification": "organico", "automation_score": 0.0, '
-        '"anonymity": 0.0, "confidence": 0.7, "evidence": ["..."]}]\n'
+        '[{"i": 1, "classification": "ciudadano", "nivel_gobierno": null, "partido": null, '
+        '"alcance": null, "automation_score": 0.0, "anonymity": 0.0, "confidence": 0.7, '
+        '"evidence": ["..."]}]\n'
         f"classification debe ser una de: {', '.join(CLASSIFIER_CLASSES)}."
     )
     lines = []
@@ -823,11 +872,11 @@ def build_llm_prompt(batch: List[Account]) -> List[Dict[str, str]]:
         parts = [
             f"[{i}] nombre: {acc.display_name!r}",
             f"red: {acc.network}",
+            f"tipo: {'publica posts (página/perfil)' if acc.n_posts else 'solo comenta'}",
         ]
         if acc.followers is not None:
             parts.append(f"seguidores: {acc.followers}")
-        if acc.bio:
-            parts.append(f"bio: {' '.join(acc.bio.split())[:300]}")
+        parts.append(f"bio: {' '.join(acc.bio.split())[:400]}" if acc.bio else "bio: (no disponible)")
         parts.append(f"features: {json.dumps(acc.features, ensure_ascii=False)}")
         sample = " | ".join(t[:200] for t in texts)
         parts.append(f"textos: {sample}")
@@ -837,16 +886,16 @@ def build_llm_prompt(batch: List[Account]) -> List[Dict[str, str]]:
 
 
 def llm_classify_batch(batch: List[Account], override: bool = False,
-                       model: Optional[str] = None) -> List[Dict[str, Any]]:
+                       model: Optional[str] = None, _retrying: bool = False) -> List[Dict[str, Any]]:
     """Send one batch of accounts to the LLM and return a list of parsed dicts
     (one per account, in order). Content-addressed cache via ``llm_cached_call``;
     on parse failure the fallback yields organico/low-confidence for the batch."""
     from src.oai.llm_core import llm_cached_call, get_text_content, parse_json_response
 
     messages = build_llm_prompt(batch)
-    # Content-keyed cache id: names + features so identical evidence re-uses cache.
+    # Content-keyed cache id: names + bio + features so identical evidence re-uses cache.
     cache_key = hash(json.dumps(
-        [(a.display_name, a.network, a.features, a.texts()[:LLM_SAMPLE_TEXTS]) for a in batch],
+        [(a.display_name, a.network, a.bio, a.features, a.texts()[:LLM_SAMPLE_TEXTS]) for a in batch],
         ensure_ascii=False, sort_keys=True, default=str,
     ))
 
@@ -857,11 +906,11 @@ def llm_classify_batch(batch: List[Account], override: bool = False,
         return data
 
     def fallback_fn(_response):
-        return [{"i": i + 1, "classification": "organico", "automation_score": 0.0,
+        return [{"i": i + 1, "classification": "ciudadano", "automation_score": 0.0,
                  "anonymity": 0.0, "confidence": 0.1, "evidence": ["fallback: parse error"]}
                 for i in range(len(batch))]
 
-    return llm_cached_call(
+    result = llm_cached_call(
         cache_tag=f"classify_users_{CLASSIFIER_VERSION}",
         request_id=cache_key,
         cache_field="classifications",
@@ -870,16 +919,41 @@ def llm_classify_batch(batch: List[Account], override: bool = False,
         override=override,
         fallback_fn=fallback_fn,
     )
+    # A malformed answer used to sink the whole batch into the fallback
+    # (2026-09-14: two runs, one batch each). Retry the halves with a fresh call
+    # instead; a single account that still fails keeps the fallback.
+    if _is_parse_fallback(result) and len(batch) > 1 and not _retrying:
+        mid = len(batch) // 2
+        logger.warning("classify batch of %d failed to parse — retrying in halves", len(batch))
+        left = llm_classify_batch(batch[:mid], override=True, model=model, _retrying=len(batch) <= 2)
+        right = llm_classify_batch(batch[mid:], override=True, model=model, _retrying=len(batch) <= 2)
+        return left + right
+    return result
+
+
+def _is_parse_fallback(result: Any) -> bool:
+    return (isinstance(result, list) and bool(result) and isinstance(result[0], dict)
+            and result[0].get("evidence") == ["fallback: parse error"])
 
 
 def _validate_llm_result(raw: Dict[str, Any], acc: Account) -> None:
     """Fold a validated LLM result into an account (strict, with safe fallbacks)."""
-    from src.models.social_users import CLASSIFIER_CLASSES
+    from src.models.social_users import (CLASSIFIER_CLASSES, DEFAULT_CLASS, V1_TO_V2,
+                                         NIVELES_GOBIERNO, ALCANCES_MEDIO)
 
-    cls = str(raw.get("classification", "organico"))
+    cls = str(raw.get("classification", DEFAULT_CLASS))
+    attrs: Dict[str, Any] = {}
+    if cls in V1_TO_V2:                      # a model may still answer in v1 words
+        cls, attrs = V1_TO_V2[cls]
     if cls not in CLASSIFIER_CLASSES:
-        cls = "organico"
+        cls = DEFAULT_CLASS
     acc.classification = cls
+    nivel = raw.get("nivel_gobierno")
+    acc.nivel_gobierno = nivel if (cls in ("politico", "institucion") and nivel in NIVELES_GOBIERNO) else None
+    partido = raw.get("partido")
+    acc.partido = (str(partido).strip() or None) if (cls in ("politico", "partido") and partido) else None
+    alcance = raw.get("alcance") or attrs.get("alcance")
+    acc.alcance = alcance if (cls == "medio" and alcance in ALCANCES_MEDIO) else None
     acc.confidence = _clamp01(raw.get("confidence", 0.0))
     acc.anonymity = _clamp01(raw.get("anonymity", 0.0))
     llm_auto = _clamp01(raw.get("automation_score", 0.0))
@@ -910,27 +984,42 @@ def classify_accounts(
     sources_mgr: Any = None,
     override: bool = False,
     model: Optional[str] = None,
+    politician_pages: Optional[List[str]] = None,
+    party_pages: Optional[List[str]] = None,
+    media_pages: Optional[List[str]] = None,
 ) -> int:
     """Stage C. Compute automation from features, apply deterministic bypasses,
-    and LLM-classify only accounts with ``appearances >= min_activity``. Accounts
-    below the gate are left as organico/low-confidence with no LLM call. Returns
-    the number of LLM calls made."""
+    and LLM-classify every post author plus the commenters with ``appearances >=
+    min_activity``. Commenters below the gate are left as ciudadano (sin
+    verificar)/low-confidence with no LLM call. Returns the number of LLM calls made."""
     from src.models.social_users import normalize_name
     official_norm = {normalize_name(p) for p in (official_pages or [])}
+    politician_norm = {normalize_name(p) for p in (politician_pages or [])}
+    party_norm = {normalize_name(p) for p in (party_pages or [])}
+    media_norm = {normalize_name(p) for p in (media_pages or [])}
 
     pending: List[Account] = []
     for acc in accounts.values():
         acc.automation_score, acc.automation_evidence = compute_automation(acc.features)
 
-        deterministic = deterministic_classification(acc, official_norm, sources_mgr)
+        deterministic = deterministic_classification(
+            acc, official_norm, sources_mgr,
+            politician_pages_norm=politician_norm, party_pages_norm=party_norm,
+            media_pages_norm=media_norm)
         if deterministic is not None:
-            acc.classification, acc.confidence, acc.evidence = deterministic
+            acc.classification, acc.confidence, acc.evidence, attrs = deterministic
+            acc.nivel_gobierno = attrs.get("nivel_gobierno")
+            acc.partido = attrs.get("partido")
+            acc.alcance = attrs.get("alcance")
             continue
 
-        if acc.appearances < min_activity:
-            acc.classification = "organico"
+        # The activity gate is for commenters (thousands, thin evidence). Post
+        # authors — pages and profiles — are few, carry the bio and are exactly
+        # the accounts the taxonomy is about: always classified (2026-09-14).
+        if acc.n_posts == 0 and acc.appearances < min_activity:
+            acc.classification = "ciudadano"
             acc.confidence = 0.2
-            acc.evidence = ["actividad insuficiente para clasificación (bajo umbral)"]
+            acc.evidence = ["sin verificar: actividad insuficiente para clasificación (bajo umbral)"]
             continue
 
         pending.append(acc)
@@ -957,12 +1046,13 @@ def build_review_table(accounts: Dict[str, Account], limit: Optional[int] = None
                      key=lambda a: (a.automation_score, a.appearances), reverse=True)
     if limit:
         ordered = ordered[:limit]
-    header = f"{'account':38} {'tier':7} {'class':14} {'auto':5} {'app':4}  evidence"
+    header = f"{'account':38} {'tier':7} {'class':14} {'attr':10} {'auto':5} {'app':4}  evidence"
     lines = [header, "-" * len(header)]
     for a in ordered:
         ev = "; ".join((a.automation_evidence or a.evidence)[:1])
+        attr = a.nivel_gobierno or a.partido or a.alcance or ""
         lines.append(
-            f"{a.display_name[:37]:38} {a.tier:7} {a.classification:14} "
+            f"{a.display_name[:37]:38} {a.tier:7} {a.classification:14} {attr[:10]:10} "
             f"{a.automation_score:<5.2f} {a.appearances:<4} {ev[:60]}"
         )
     return "\n".join(lines)
@@ -977,6 +1067,10 @@ def account_to_record(acc: Account, model: Optional[str]) -> Dict[str, Any]:
         profile_url=acc.profile_url,
         classification=acc.classification,
         classification_confidence=acc.confidence,
+        nivel_gobierno=acc.nivel_gobierno,
+        partido=acc.partido,
+        alcance=acc.alcance,
+        bio=acc.bio,
         automation_score=acc.automation_score,
         automation_evidence=acc.automation_evidence,
         anonymity=acc.anonymity,
@@ -1052,6 +1146,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     llm_calls = classify_accounts(
         accounts, args.min_activity, args.official_pages or [],
         sources_mgr=sources_mgr, override=args.override, model=effective_model,
+        politician_pages=args.politician_pages, party_pages=args.party_pages,
+        media_pages=args.media_pages,
     )
     logger.info("LLM batch calls: %d", llm_calls)
 
@@ -1095,7 +1191,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-activity", dest="min_activity", type=int, default=2,
                    help="minimum appearances before an account is sent to the LLM")
     p.add_argument("--official-pages", dest="official_pages", nargs="*", default=None,
-                   help="page names to map deterministically to pagina_oficial")
+                   help="page names to map deterministically to institucion")
+    p.add_argument("--politician-pages", dest="politician_pages", nargs="*", default=None,
+                   help="page names to map deterministically to politico")
+    p.add_argument("--party-pages", dest="party_pages", nargs="*", default=None,
+                   help="page names to map deterministically to partido")
+    p.add_argument("--media-pages", dest="media_pages", nargs="*", default=None,
+                   help="page names to map deterministically to medio (alcance local)")
     p.add_argument("--model", default=None, help="LLM model override (else OPENROUTER_MODEL)")
     p.add_argument("--override", action="store_true", help="bypass LLM cache reads")
     p.add_argument("--table-rows", dest="table_rows", type=int, default=None,

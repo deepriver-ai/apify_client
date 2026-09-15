@@ -83,12 +83,31 @@ class TestBuildRecord:
     def test_unknown_class_coerced(self):
         rec = build_record(tier=TIER_NAME, network="facebook",
                            display_name="x", classification="bot")
-        assert rec["classification"] == "organico"  # bot is not a stored class
+        assert rec["classification"] == "ciudadano"  # bot is not a stored class
 
     def test_all_stored_classes_valid(self):
         assert "bot" not in CLASSIFIER_CLASSES
         assert "influencer" not in CLASSIFIER_CLASSES
-        assert "organico" in CLASSIFIER_CLASSES
+        assert "ciudadano" in CLASSIFIER_CLASSES
+        assert "organico" not in CLASSIFIER_CLASSES        # v1 name, mapped at read time
+
+    def test_v1_class_mapped_in_build_record(self):
+        rec = build_record(tier=TIER_NAME, network="facebook", display_name="x",
+                           classification="sitio_estatal", bio="  Noticias\n de Querétaro ")
+        assert rec["classification"] == "medio" and rec["alcance"] == "estatal"
+        assert rec["bio"] == "Noticias de Querétaro"
+        rec = build_record(tier=TIER_NAME, network="facebook", display_name="x",
+                           classification="politico", nivel_gobierno="estatal", partido="PAN")
+        assert rec["nivel_gobierno"] == "estatal" and rec["partido"] == "PAN"
+
+    def test_upgrade_record_maps_v1(self):
+        from src.models.social_users import upgrade_record
+        rec = upgrade_record({"classification": "pagina_oficial", "n_comments": 1})
+        assert rec["classification"] == "institucion" and rec["classification_v1"] == "pagina_oficial"
+        rec = upgrade_record({"classification": "sitio_local"})
+        assert rec["classification"] == "medio" and rec["alcance"] == "local"
+        rec = upgrade_record({"classification": "medio", "alcance": "nacional"})
+        assert rec["classification"] == "medio" and rec["alcance"] == "nacional" and "classification_v1" not in rec
 
     def test_evidence_sample_capped(self):
         rec = build_record(tier=TIER_NAME, network="facebook", display_name="x",
@@ -99,11 +118,11 @@ class TestBuildRecord:
 class TestSocialUsersStore:
     def test_get_by_profile_url(self):
         coll = MagicMock()
-        coll.find_one.return_value = {"_id": "profile:facebook.com/x", "classification": "organico"}
+        coll.find_one.return_value = {"_id": "profile:facebook.com/x", "classification": "ciudadano"}
         store = SocialUsers(collection=coll)
         rec = store.get_by_profile_url("https://www.facebook.com/x/")
         coll.find_one.assert_called_once_with({"_id": "profile:facebook.com/x"})
-        assert rec["classification"] == "organico"
+        assert rec["classification"] == "ciudadano"
 
     def test_get_degrades_on_error(self):
         coll = MagicMock()
