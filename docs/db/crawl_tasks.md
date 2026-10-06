@@ -287,8 +287,7 @@ coverage for the availability manifest, agent_framework §7.5).
 
 ### 2.8 Review decisions (Oscar, 2026-10-06) — folded into the migration
 
-Applied to the **local** userdb only (localhost:5334) and smoke-tested (14 checks, rolled
-back); **not** on stg.
+Smoke-tested on the local userdb (14 checks, rolled back); **applied to stg 2026-10-06** with the RBAC rows and the worker role, and folded into `media-backend-paid/db/user_db/schema.sql`.
 
 | # | Decision | Where |
 |---|---|---|
