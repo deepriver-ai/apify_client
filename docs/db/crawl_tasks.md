@@ -665,12 +665,24 @@ So the importer maps by `theme` and uses `ids.json` only to warn, never as the k
 | Q4 | Run queue vhost: `document_processing_stg`/prod (user logic, touches userdb) while documents still publish to the document vhost — OK to have two connections? | yes, consume user-logic vhost, publish documents vhost; dev = `document_processing_dev` for both |
 | Q5 | DB role for the worker (`backend` or a dedicated `crawler` role with DML on `crawl_*` + INSERT on `usage_events`)? | dedicated role (+ SELECT on `user_searches` for the org triggers, §2.8) |
 | Q6 | Split the duplicate legacy ids 35/36/37 (lose one cache pass) or keep the shared key? | split |
-| Q7 | RBAC source endpoints to clone: reads from saved-search list, writes/paid launch only for owner/admin roles in the demo phase ("customers read and propose") | `/crawl/tasks/propose` open to org users, all other writes operator-only |
+| Q7 | RBAC source endpoints to clone | **Decided 2026-10-06**: READ mirrors `/savedsearches/get`; PROPOSE (`/crawl/tasks/propose`, `/crawl/comments/request`) mirrors `/savedsearches/save`; OPERATE (create/update/set_status/link/unlink/schedule, `/crawl/runs/request`, `/crawl/runs/cancel`, `/crawl/comments/approve`) = `/savedsearches/save` owner rows only — the owner seat of every customer org is a deepriver.ai service user. Script: `media-backend-paid/docs/db/migrations/2026-10-06_crawl_rbac_update_userdb.sql` |
 | Q8 | `customer_ops` writes via API (as an org user, sprint §8 item 3) or direct SQL? | API |
 | Q9 | Where does the WS-4 `classify_users` pass run once there is no per-theme batch? | separate scheduled job per org, scope = flagged tasks |
 | Q10 | One schedule per task enough, or multiple windows (e.g. hourly during an event, daily otherwise)? | one, edited for event periods. Revisit with Feria (WS-5) |
 
 ---
+
+## 11. Follow-ups (later)
+
+- **F1 — every run saved and linked to the usage ledger** (Oscar, 2026-10-06). Every
+  crawl execution gets a `crawl_runs` row — API, schedule *and* hand runs
+  (`run_searches.py`, `trigger='cli'`), including `blocked` / `failed` / `cancelled` /
+  dry runs — and is linked to the rate-limiting ledger `usage_events`
+  ([`business_agent/docs/plans/rate_limiting.md`](../../../business_agent/docs/plans/rate_limiting.md)
+  §2.2): `crawl_run_calls.usage_event_id` becomes a real FK once the `usage_events`
+  migration lands, and each `usage_events` row carries the `run_id` (column or `raw`)
+  so cost rolls up per run, task, search and org. Lands after the `usage_events` table
+  exists (rate-limiting P0/P2).
 
 ## Appendix A — proposed section for `media-backend-paid/docs/DATABASE_POSTGRES.md`
 
