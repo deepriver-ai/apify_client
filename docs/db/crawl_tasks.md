@@ -285,6 +285,23 @@ coverage for the availability manifest, agent_framework §7.5).
 
 ---
 
+### 2.8 Review decisions (Oscar, 2026-10-06) — folded into the migration
+
+Applied to the **local** userdb only (localhost:5334) and smoke-tested (14 checks, rolled
+back); **not** on stg.
+
+| # | Decision | Where |
+|---|---|---|
+| R1 | `max_results` hard ceiling **1000** per task (`CHECK`), whatever the caller; budgets/admission sit on top | `crawl_tasks_max_results_chk` |
+| R2 | A task may have **no time window** (`min_date` and `period` both NULL): the worker then sends **no** date filter to the actor; `max_results` is the only bound. `min_date` XOR `period` still holds | §6.2; `crawl_tasks_min_date_xor_period_chk` |
+| R3 | Dedupe is **order-insensitive** on `search_params` (params run as independent queries): unique index over `crawl_params_key(search_params)` (sorted jsonb array); the backend also sorts on write | `crawl_tasks_live_scope_uniq` |
+| R4 | **Org consistency in the DB**, not only in endpoints: triggers check task ↔ search (`crawl_task_searches`), run ↔ task / comment request / search (`crawl_runs`), comment request ↔ source task / search. No change to `user_searches`. Endpoints keep the check + tests | `crawl_*_same_org` triggers |
+| R5 | Several `requested` runs may exist for one task; the `requested → queued` transition hits `crawl_runs_one_live_per_task` for all but one — the caller catches the unique violation and sets that run `cancelled` (`error = 'duplicate live run'`) | §5.2, §6.1 |
+| R6 | `updated_at` maintained by trigger on `crawl_tasks` / `crawl_schedules`; a `comments` run must have `task_id IS NULL`; a comment request in `approved`/`running`/`done` must carry `approved_by` + `approved_at`; Instagram `cap_scope = per_param` verified (resultsLimit per hashtag/URL, queenlike one call per username) | constraints in the migration |
+
+Note for Q5 (worker role): the org triggers run as the invoking role, so the worker role
+needs `SELECT` on `crawl_tasks`, `crawl_comment_requests` and `user_searches` besides its DML.
+
 ## 3. `tasks.xlsx` column mapping
 
 The live header (2026-10-05) has 24 columns and 185 rows. `task_id` is filled on every
@@ -646,7 +663,7 @@ So the importer maps by `theme` and uses `ids.json` only to warn, never as the k
 | Q2 | Import disabled rows of dropped themes (sjdr, morelia_descifra, queretaro) as `retired`, or skip them? | import as `retired` (keeps history and the `legacy_task_id` → filter-cache link) |
 | Q3 | Where does the scheduler live: a tick in `search-sentiment-poller-tasker` (has userdb + 1-min loop), the backend, or the `apify_client` worker? | poller tick, admitting through `usage_client.admission` (same code as the backend) |
 | Q4 | Run queue vhost: `document_processing_stg`/prod (user logic, touches userdb) while documents still publish to the document vhost — OK to have two connections? | yes, consume user-logic vhost, publish documents vhost; dev = `document_processing_dev` for both |
-| Q5 | DB role for the worker (`backend` or a dedicated `crawler` role with DML on `crawl_*` + INSERT on `usage_events`)? | dedicated role |
+| Q5 | DB role for the worker (`backend` or a dedicated `crawler` role with DML on `crawl_*` + INSERT on `usage_events`)? | dedicated role (+ SELECT on `user_searches` for the org triggers, §2.8) |
 | Q6 | Split the duplicate legacy ids 35/36/37 (lose one cache pass) or keep the shared key? | split |
 | Q7 | RBAC source endpoints to clone: reads from saved-search list, writes/paid launch only for owner/admin roles in the demo phase ("customers read and propose") | `/crawl/tasks/propose` open to org users, all other writes operator-only |
 | Q8 | `customer_ops` writes via API (as an org user, sprint §8 item 3) or direct SQL? | API |
