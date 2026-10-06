@@ -613,7 +613,14 @@ So the importer maps by `theme` and uses `ids.json` only to warn, never as the k
    proto06_test_apify_client`, `rate_limiting.md` §10) and to local userdb `:5334`
    (`dev/docs/db/userdb_runbook.md`). Seed `crawl_actor_classes` from the registry.
    Applying it to stg proto06 needs Oscar's go.
-2. **Import script** `apify_client/src/scripts/import_tasks_xlsx.py` (to be written).
+2. **Import script** `apify_client/src/scripts/import_tasks_xlsx.py` — **written
+   2026-10-06** (branch `crawl-import`; tested on a throwaway userdb, stg dry run only).
+   Decisions applied (Oscar 2026-10-05/06): kept orgs 62 (`totalenergies` +
+   `totalenergies_guadalupe`), 102, 106 → enabled `active`, disabled `paused`, except
+   legacy 145 (past V Informe) → `retired`; `sjdr`/`zona_fest` → 101,
+   `morelia_descifra` → 105, `queretaro` → 93 imported `retired` (Q2); `orizaba` and
+   the five org-less legacy themes skipped (Q1). Stg dry run 2026-10-06: 154 to insert
+   (87 active / 15 paused / 52 retired), 31 skipped, 0 conflicts, 0 constraint failures.
    It follows the plan/apply split of `customer_ops`:
    - Read **all** rows with `CrawlTask.from_csv_row()`. `load_tasks()` drops disabled
      rows (`crawl_task.py:139-157`).
