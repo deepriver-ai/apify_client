@@ -114,6 +114,57 @@ class CrawlTask:
             actor_params=actor_params,
         )
 
+    @classmethod
+    def from_db_row(cls, row: Dict[str, Any]) -> CrawlTask:
+        """Build a CrawlTask from a userdb ``crawl_tasks`` row (dict, jsonb already decoded).
+
+        Same field semantics as ``from_csv_row`` (docs/db/crawl_tasks.md §2.2 / §3), so
+        ``to_actor_kwargs()`` stays the single param path for the xlsx hand runs and the
+        queue worker. ``task_id`` is the filter-cache key: ``legacy_task_id`` for imported
+        rows (keeps their cached decisions), else ``db:<task_id>``. ``override_filters``
+        is a run option, not a task column, so it defaults to False here. ``enabled``
+        mirrors ``status == 'active'``; the worker runs whatever run row it is handed.
+        """
+        search_params = [str(p).strip() for p in (row.get("search_params") or []) if str(p).strip()]
+        if not search_params:
+            raise ValueError(f"crawl task {row.get('task_id')} has no search_params")
+        period = row.get("period")
+        if period is not None and period not in ("d", "w", "m"):
+            raise ValueError(f"crawl task {row.get('task_id')}: invalid period {period!r}")
+        min_date = row.get("min_date")
+        if min_date is not None and period is not None:
+            raise ValueError(
+                f"crawl task {row.get('task_id')} has both min_date and period set. They are mutually exclusive."
+            )
+        actor_params = row.get("actor_params") or {}
+        if not isinstance(actor_params, dict):
+            raise ValueError(f"crawl task {row.get('task_id')}: actor_params must be an object")
+        legacy = row.get("legacy_task_id")
+        return cls(
+            task_id=str(legacy) if legacy else f"db:{row['task_id']}",
+            actor_class=row["actor_class"],
+            search_params=search_params,
+            country_id=row.get("country_id") or None,
+            language=row.get("language") or None,
+            max_results=int(row.get("max_results") or 30),
+            min_date=min_date,
+            period=period,
+            enabled=row.get("status", "active") == "active",
+            publish=bool(row.get("publish", True)),
+            get_comments=bool(row.get("get_comments", False)),
+            max_comments=int(row["max_comments"]) if row.get("max_comments") is not None else 15,
+            not_keywords=[str(k) for k in (row.get("not_keywords") or []) if str(k).strip()],
+            llm_filter_condition=row.get("llm_filter_condition") or None,
+            override_filters=False,
+            update_existing=bool(row.get("update_existing", False)),
+            enrich_followers=bool(row.get("enrich_followers", False)),
+            fetch_attached_url=bool(row.get("fetch_attached_url", False)),
+            classify_users=bool(row.get("classify_users", False)),
+            official_page=bool(row.get("official_page", False)),
+            theme=row.get("legacy_theme") or None,
+            actor_params=dict(actor_params),
+        )
+
     def to_actor_kwargs(self) -> Dict[str, Any]:
         """Merge common params and actor-specific params into kwargs for the actor."""
         kwargs: Dict[str, Any] = {

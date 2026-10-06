@@ -26,12 +26,16 @@ ACTOR_REGISTRY = {
 }
 
 
-def get_actor(actor_class: str) -> ApifyActor:
-    """Instantiate an actor by its registry key."""
+def get_actor(actor_class: str, client=None) -> ApifyActor:
+    """Instantiate an actor by its registry key.
+
+    ``client`` (optional) is the Apify client the actor and its utility actors use;
+    the crawl-run queue worker passes a recording client so every call is metered.
+    """
     cls = ACTOR_REGISTRY.get(actor_class)
     if cls is None:
         raise ValueError(
             f"Unknown actor_class '{actor_class}'. "
             f"Available: {', '.join(ACTOR_REGISTRY)}"
         )
-    return cls()
+    return cls(client=client) if client is not None else cls()

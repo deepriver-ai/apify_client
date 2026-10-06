@@ -4,10 +4,12 @@ import copy
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from collections import Counter
 from typing import Any, Dict, List, Optional, Set
 
 from apify_client import ApifyClient
+from dateutil import parser as dateutil_parser
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,6 +31,8 @@ FILTER_CACHE_PATH = os.path.join("cache", "filter_cache.json")
 logger = logging.getLogger(__name__)
 
 PERIOD_DAYS = {"d": 1, "w": 7, "m": 30}
+
+_MX_FIXED_TZ = timezone(timedelta(hours=-6))
 
 
 LLM_FILTER_BATCH_SIZE = 20
@@ -75,6 +79,44 @@ class ApifyActor:
         self.search_params_keywords: List[str] = []  # Should be set by the actor subclass when the scraping is keyword or hashtag-based
         self._filter_cache: Dict[str, bool] = self._load_filter_cache()
         self.filtered_documents: List[Dict[str, Any]] = []
+        self.reset_funnel()
+
+    # --- Run funnel (crawl_runs counters, docs/db/crawl_tasks.md §2.5 / §7.3) ---
+
+    def reset_funnel(self) -> None:
+        """Reset the per-actor funnel counters.
+
+        ``funnel`` accumulates over the actor instance's lifetime (one queue-worker
+        run builds one actor): ``docs_in`` = documents entering ``process_documents``
+        (mapped dataset items, after in-actor dedupe), ``dropped_<reason>`` = documents
+        removed by each filter stage (same reasons as ``filtered_documents``), and
+        ``newest_item_at`` / ``oldest_item_at`` = the timestamp span of ``docs_in``.
+        """
+        self.funnel: Counter = Counter()
+        self.funnel_newest: Optional[datetime] = None
+        self.funnel_oldest: Optional[datetime] = None
+
+    def _count_pipeline_input(self, documents: List) -> None:
+        """Count documents entering the pipeline and their timestamp span (cheap)."""
+        if not hasattr(self, "funnel"):
+            self.reset_funnel()
+        self.funnel["docs_in"] += len(documents)
+        for doc in documents:
+            raw = doc.data.get("timestamp") if hasattr(doc, "data") else None
+            if not raw:
+                continue
+            try:
+                ts = raw if isinstance(raw, datetime) else dateutil_parser.parse(str(raw))
+            except (ValueError, OverflowError, TypeError):
+                continue
+            if ts.tzinfo is None:
+                # Intermediate timestamps without an offset are Mexico City local time
+                # (schema convention); tag them UTC-6 so they compare with aware ones.
+                ts = ts.replace(tzinfo=_MX_FIXED_TZ)
+            if self.funnel_newest is None or ts > self.funnel_newest:
+                self.funnel_newest = ts
+            if self.funnel_oldest is None or ts < self.funnel_oldest:
+                self.funnel_oldest = ts
 
     def run_actor(self, run_input: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Run the Apify actor and return raw results."""
@@ -106,6 +148,9 @@ class ApifyActor:
 
         if not hasattr(self, "filtered_documents"):
             self.filtered_documents = []
+        if not hasattr(self, "funnel"):
+            self.reset_funnel()
+        self.funnel[f"dropped_{reason}"] += len(removed)
 
         for doc in removed:
             entry = {
@@ -121,7 +166,12 @@ class ApifyActor:
             self.filtered_documents.append(entry)
 
     def _filter_cached_documents(self, documents: List, task_id: str, override: bool = False) -> List:
-        """Skip docs previously cached as filtered-out for this task."""
+        """Skip docs previously cached as filtered-out for this task.
+
+        Every ``process_documents`` (base and overrides) calls this first, so it is
+        also where pipeline input is counted for the run funnel.
+        """
+        self._count_pipeline_input(documents)
         if override or not task_id:
             return documents
 

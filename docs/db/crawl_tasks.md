@@ -461,6 +461,38 @@ New wiring in `apify_client`:
 - Local runs use `document_processing_dev` + `dev_crawl_runs` (workspace `CLAUDE.md`
   §Environments).
 
+#### 6.1.1 Worker as implemented (2026-10-06, `src/run_crawl_worker.py`, `src/worker/`)
+
+Points the code had to settle. The message shape above is unchanged.
+- **Missing org**: ack + error log as specified, and the `queued` run is also set
+  `failed` ("message missing org_id") so it does not hold the one-live-run slot. No
+  `usage_blocks` row: the table doesn't exist yet and the worker role has no grant on it.
+- **What wins**: the run row's `max_items` (≤ task `max_results`), `window_since`
+  (replaces the task's `min_date`/`period`), `dry_run` and `params.override_filters`;
+  everything else comes from the task row through `CrawlTask.from_db_row()` +
+  `to_actor_kwargs()`. Message `params` are only diffed (`stats.message_params_diff`).
+- **R2**: with no window, `google_news` gets `timeframe="all"` (its built-in default
+  is `"1d"`) unless the task sets `timeframe` in `actor_params`.
+- **Item cap**: the paid-item budget across `search` calls is
+  `max_items × len(search_params)` for `cap_scope='per_param'`, else `max_items`. It is
+  passed to Apify as `max_items` on each search call, and a spent budget stops further
+  calls. Enrichment calls (profiles, comments) are not item-capped.
+- **Cost cap**: min(message `max_cost_usd`, task `max_cost_usd_per_run`, run
+  `admitted_usd`). It is passed as `max_total_charge_usd` (honoured by pay-per-event
+  actors), and further calls stop once it is spent.
+- **`crawl_run_calls.purpose`** comes from the pipeline stage the call runs in
+  (`_enrich_user_author` → profiles, `_enrich_comments` → comments, `_download_video` →
+  video, other enrichment → other, else search). `items` is the dataset `itemCount`.
+  `items_paid` sums the search calls (comments calls for `kind='comments'`).
+- **Dry runs** still fill `items_new` / `attached_news_published` with the
+  would-be-published counts, so the §9.2 parallel run can compare yields.
+- **Comments runs** read posts by `crawl_comment_request_posts.run_id`, so **the
+  approve endpoint must set `run_id` on each post**. `max_comments` is the tier depth.
+- **Schedules**: only `trigger='schedule'` runs update `crawl_schedules`. `partial` counts
+  as a failure there, so the window does not advance.
+- **Not in the worker**: the stale-heartbeat reaper (§5.2) and the WS-4
+  `classify_users` pass (Q9).
+
 ### 6.2 Scheduling and newest-first incrementality
 
 The scheduler ticks every minute ("the poller pattern", agent_framework §5.2):
