@@ -26,7 +26,7 @@ Decisions encoded here (Oscar, 2026-10-05/06; doc §9.1, §10 Q1/Q2/Q6):
 * Retired themes (disabled 2026-10-05) whose org is on record are imported as
   ``retired`` whatever their ``enabled`` cell says (Q2): keeps history and the
   ``legacy_task_id`` → filter-cache link.
-* Themes with no org on record (Q1) and ``orizaba`` (new org pending) are
+* Themes with no org on record (Q1) are
   skipped and listed.
 * Duplicate legacy ids (35/36/37): the first row in file order keeps the id,
   later ones get ``35~2``, ``35~3`` … (Q6).
@@ -82,6 +82,7 @@ KEEP_THEMES: Dict[str, int] = {
     "totalenergies_guadalupe": 62,  # Q1: same customer
     "zitacuaro": 102,
     "pinal_amoles": 106,
+    "orizaba": 92,  # existing org 92 "Orizaba" (Oscar, 2026-10-06)
 }
 
 #: themes disabled 2026-10-05 whose org is on record → imported as retired (Q2).
@@ -94,7 +95,6 @@ RETIRED_THEMES: Dict[str, int] = {
 
 #: themes not imported, with the reason printed in the report.
 SKIP_THEMES: Dict[str, str] = {
-    "orizaba": "new Orizaba org pending (today 47 Clicnews / 92 Orizaba) — import later",
     "mc": "no org on record (Q1)",
     "top_news": "no org on record (Q1)",
     "chepe_guerrero": "no org on record (Q1)",

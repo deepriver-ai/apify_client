@@ -13,7 +13,7 @@ import pytest
 from src.scripts import import_tasks_xlsx as imp
 
 ACTORS = {a: {} for a in imp.ACTOR_PARAM_KEYS}
-ORGS = {62, 93, 101, 102, 105, 106}
+ORGS = {62, 92, 93, 101, 102, 105, 106}
 
 
 def _row(**kw) -> dict:
@@ -56,7 +56,7 @@ def test_duplicate_legacy_ids_split_first_keeps_key():
     ("zona_fest", False, "87", (101, "retired")),
     ("morelia_descifra", False, "125", (105, "retired")),
     ("queretaro", False, "4", (93, "retired")),
-    ("orizaba", False, "9", (None, None)),
+    ("orizaba", False, "9", (92, "paused")),          # existing org 92 (2026-10-06)
     ("mc", False, "100", (None, None)),
     ("unknown_theme", True, "x", (None, None)),
     (None, True, "x", (None, None)),
