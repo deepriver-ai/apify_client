@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 from typing import Any, Dict, List, Optional, Set
@@ -11,6 +12,8 @@ from typing import Any, Dict, List, Optional, Set
 from apify_client import ApifyClient
 from dateutil import parser as dateutil_parser
 from dotenv import load_dotenv
+
+from src.helpers.atomic_json import atomic_write_json
 
 load_dotenv()
 
@@ -52,6 +55,9 @@ class UnmeteredApifyClient:
 
 # TODO: Replace file-based filter cache with Redis for multi-process/distributed support
 FILTER_CACHE_PATH = os.path.join("cache", "filter_cache.json")
+# Concurrent runs in one worker process (CRAWL_WORKER_CONCURRENCY) each hold their own
+# copy of the filter cache; saves merge with what is on disk under this lock.
+_FILTER_CACHE_LOCK = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -419,13 +425,15 @@ class ApifyActor:
         return {}
 
     def _save_filter_cache(self) -> None:
-        """Persist the filter cache to disk."""
-        os.makedirs(os.path.dirname(FILTER_CACHE_PATH), exist_ok=True)
-        try:
-            with open(FILTER_CACHE_PATH, "w", encoding="utf-8") as f:
-                json.dump(self._filter_cache, f, ensure_ascii=False)
-        except OSError:
-            logger.warning("Could not save filter cache to %s", FILTER_CACHE_PATH)
+        """Persist the filter cache: merge with the on-disk copy (other runs of this
+        process may have saved since we loaded; our entries win) and write atomically."""
+        with _FILTER_CACHE_LOCK:
+            try:
+                merged = {**self._load_filter_cache(), **self._filter_cache}
+                atomic_write_json(FILTER_CACHE_PATH, merged, ensure_ascii=False)
+                self._filter_cache = merged
+            except OSError:
+                logger.warning("Could not save filter cache to %s", FILTER_CACHE_PATH)
 
     def _llm_filter_cache_id(self, doc, condition: str, snippet_max_len: int):
         """Per-document LLM-filter cache key: (url, condition, snippet_max_len).

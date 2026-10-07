@@ -385,10 +385,17 @@ def _expand(docs: List[Any]) -> Tuple[List[Any], int]:
     return expanded, attached
 
 
+# publish_document goes through one module-level pika BlockingConnection
+# (src/helpers/rabbitmq.py), which is not thread-safe: concurrent runs
+# (CRAWL_WORKER_CONCURRENCY > 1) publish one document at a time.
+_PUBLISH_LOCK = threading.Lock()
+
+
 def _default_publish(doc: Any) -> None:
     from src.helpers.serialization import publish_document
 
-    publish_document(doc)
+    with _PUBLISH_LOCK:
+        publish_document(doc)
 
 
 def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> str:

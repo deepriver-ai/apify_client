@@ -163,7 +163,7 @@ class CrawlDB:
 
     def update_schedule_after_run(self, task_id: int, run_id: int, success: bool) -> int:
         """Immediate feedback only: ``last_run_id`` (+ ``last_success_at``). The failure
-        response — ``consecutive_failures``, retry backoff on ``next_run_at``, auto-pause
+        response — ``consecutive_failures``, retry backoff (``retry_at``), auto-pause
         (``active``/``paused_reason``) — belongs to the poller's crawl scheduler, which
         settles every terminal scheduled run exactly once (reaped runs included), so the
         worker must not count failures too (design §6.2 "Split of schedule bookkeeping")."""

@@ -573,14 +573,38 @@ Run window: `window_since = last_success.newest_item_at − window_overlap`, or
   `partial` / `blocked` / `cancelled` runs never move it, so a retry re-covers everything
   since the last success. The endpoint refuses `trigger: "schedule"` for a task with no
   schedule row or a paused one (409), and passes `path='schedule:/crawl/runs/request'`
-  to admission.
-- **Reaper** (§5.2). `running` with `heartbeat_at` older than 5 min →
-  `failed`, `error='stale heartbeat'`. `queued` not claimed within 5 min → `failed`,
-  `error='not claimed'`. The worker heartbeat is 60 s; both thresholds are configurable
-  (`CRAWL_REAPER_STALE_HEARTBEAT_MINUTES`, `CRAWL_REAPER_UNCLAIMED_MINUTES`). The reaper
-  covers every trigger and kind. A reaped comments run closes its comment request once
-  none of its runs is open. A message for a reaped run that reaches a worker later is
-  acked and dropped, because the claim only takes `queued` rows.
+  to admission. `trigger: "schedule"` is open to every org role that may launch runs
+  (Oscar 2026-10-07): attribution is by `org_id` + `requested_by` anyway.
+- **Reaper** (§5.2).
+  - `running` with `heartbeat_at` older than 5 min → `failed`,
+    `error='stale heartbeat'` (a crashed worker; the worker heartbeat is 60 s).
+  - `queued` → `failed`, `error='not claimed'`, **only when the workers are down**
+    (Oscar 2026-10-07). The run waited more than 5 min **and** no run was claimed
+    (`started_at`) **and** no running run heartbeated in those 5 min.
+  - A backlog behind busy workers is never failed, however long it waits.
+  - Thresholds: `CRAWL_REAPER_STALE_HEARTBEAT_MINUTES`, `CRAWL_REAPER_UNCLAIMED_MINUTES`.
+  - The reaper covers every trigger and kind. A reaped comments run closes its comment
+    request once none of its runs is open.
+  - A message for a reaped run that reaches a worker later is acked and dropped (the
+    claim only takes `queued` rows).
+- **Regular slot and stagger** (Oscar 2026-10-07).
+  - `next_run_at` is the regular, anchored slot (e.g. 08:00). It fires at
+    `next_run_at − offset(task)`, where `offset = (task_id × 2654435761) mod
+    CRAWL_SCHEDULER_SPREAD_MINUTES` in seconds (default 0).
+  - With 30, a batch anchored at 08:00 fires over 07:30–08:00, the same minute every day.
+  - Advancing adds `every` to the anchor, so the cadence is stable.
+  - Retries live in `crawl_schedules.retry_at` (migration
+    `media-backend-paid/docs/db/migrations/2026-10-07_crawl_schedules_retry_at_userdb.sql`,
+    pending), never in `next_run_at`. Every dispatch clears it.
+- **Worker concurrency** (`CRAWL_WORKER_CONCURRENCY`, default 1, recommended 4). The
+  worker runs N parallel runs in one process: prefetch N, a thread and heartbeat per
+  run, manual ack per message.
+  - Shared caches are locked, merged and atomically replaced. Publishing is serialized.
+  - It is not N processes, because separate processes would overwrite each other's cache
+    files.
+  - Apify STARTER allows 32 concurrent actor runs and 64 GB. A run starts up to 3 actors
+    of 1–4 GB. With N > 1, N is capped once at startup by `GET /v2/users/me/limits`:
+    `min(jobs // 3, GB // 12)`, which is 5 on STARTER.
 
 #### 6.2.2 Failure → retry, backoff, auto-pause
 
@@ -588,11 +612,19 @@ Run window: `window_since = last_success.newest_item_at − window_overlap`, or
   included) is **settled once** by the poller. The marker is
   `crawl_runs.stats.scheduler = {outcome, consecutive_failures, retry_at, …}`.
 - **Success** sets `consecutive_failures = 0` (plus `last_run_id` and `last_success_at`).
-- **Failure** (`partial` counts) increments `consecutive_failures` and retries instead
-  of waiting for the next slot: `next_run_at = LEAST(next_run_at, now + backoff)`.
+- **Failure** increments `consecutive_failures` and retries instead of waiting for the
+  next slot: `retry_at = now + backoff`, when that is earlier than the next regular fire
+  time.
   - Backoff is 15 min, 30 min, 60 min… (`CRAWL_SCHEDULER_BACKOFF_MINUTES` ×
     2^(n−1)), capped at `every`.
   - The retry's window still starts from the last success, so nothing is lost.
+  - Failures are:
+    - a scheduled run ending `failed` / `partial`;
+    - (Oscar 2026-10-07) a request the backend refused **without a run row**: 403
+      RBAC/plan, 400/404 validation, 409 task inactive or actor disabled, login or
+      membership errors;
+    - transient errors (no HTTP answer, 5xx without a run). These back off the same way
+      but never pause.
 - **3 consecutive failures** (`CRAWL_SCHEDULER_MAX_FAILURES`) set `active = false` and
   `paused_reason = 'auto-paused <ts> after 3 consecutive failed scheduled runs (last: run
   N <status>: <error>)'`, logged as `!!! SCHEDULE PAUSED`. The task's own `status` is
@@ -606,8 +638,8 @@ Run window: `window_since = last_success.newest_item_at − window_overlap`, or
 | `crawl_schedules` column | Written by |
 |---|---|
 | `last_run_id`, `last_success_at` | worker at finish, for immediate feedback (skipped if its run was reaped), and poller on settle (covers reaped runs) |
-| `consecutive_failures` | poller only (settle). The worker's role keeps the column grant, but the worker no longer writes it |
-| `next_run_at`, `active`, `paused_reason` | poller only. The worker's role has no grant on `next_run_at` / `active` |
+| `consecutive_failures` | poller only (settle and dispatch). The worker's role keeps the column grant, but the worker no longer writes it |
+| `next_run_at`, `retry_at`, `active`, `paused_reason` | poller only. The worker's role has no grant on `next_run_at` / `retry_at` / `active`. `/crawl/tasks/schedule` clears `retry_at` on `active: true` or a new `next_run_at` |
 | everything else | backend `/crawl/tasks/schedule` |
 
 Tests: poller unit tests (policy, dispatch, backend client; HTTP and store mocked) and

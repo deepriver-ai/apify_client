@@ -4,8 +4,10 @@ import copy
 import json
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Set
 
+from src.helpers.atomic_json import atomic_write_json
 from src.helpers.str_fn import domainsplitter, get_domain
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,7 @@ else:
     _MONGO_IMPORT_ERROR = None
 
 DEFAULT_CACHE_PATH = "cache/unknown_sources.json"
+_SAVE_LOCK = threading.Lock()  # concurrent crawl runs in one worker process
 
 _BLACKLISTED_DOMAINS = {
     "youtube.com", "youtu.be",
@@ -216,6 +219,10 @@ class SourcesManagement:
 
     def save(self) -> None:
         """Load existing unknown sources from cache, prune known ones, merge new entries, and write back."""
+        with _SAVE_LOCK:
+            self._save_unlocked()
+
+    def _save_unlocked(self) -> None:
         if not _SOURCE_CATALOG_AVAILABLE:
             logger.info("Skipping unknown-source cache save because MongoDB source catalog is unavailable")
             return
@@ -237,9 +244,7 @@ class SourcesManagement:
                 seen_domains.add(domain)
                 merged.append(entry)
 
-        os.makedirs(os.path.dirname(self.cache_path) or ".", exist_ok=True)
-        with open(self.cache_path, "w") as f:
-            json.dump(merged, f, indent=2, ensure_ascii=False)
+        atomic_write_json(self.cache_path, merged, indent=2, ensure_ascii=False)
 
 
 
