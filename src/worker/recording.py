@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from usage_client import AdmissionRefused, UsageContext
+from usage_client.apify import as_dict
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +336,7 @@ class RecordingApifyClient:
         if run.get("usageTotalUsd") is not None or not run.get("id"):
             return run
         try:
-            fresh = self._client.run(run["id"]).get()
+            fresh = as_dict(self._client.run(run["id"]).get())  # apify_client 3.x: a model
             if fresh:
                 merged = dict(run)
                 for key in ("usageTotalUsd", "usage", "status", "finishedAt"):
@@ -351,7 +352,7 @@ class RecordingApifyClient:
         if not dataset_id:
             return None
         try:
-            info = self._client.dataset(dataset_id).get()
+            info = as_dict(self._client.dataset(dataset_id).get())  # apify_client 3.x: a model
             count = (info or {}).get("itemCount")
             return int(count) if count is not None else None
         except Exception as exc:

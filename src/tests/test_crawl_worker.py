@@ -872,7 +872,54 @@ class TestFromDbRow:
         assert task.not_keywords == ["a", "b"] and task.enabled is False and task.theme == "sjdr"
 
 
+class _Model:
+    """apify_client 3.x shape: a pydantic model (snake_case attributes, no ``.get``)."""
+
+    def __init__(self, **by_alias):
+        self._data = by_alias
+
+    def model_dump(self, *, by_alias=False, mode="python", exclude_none=False):
+        assert by_alias
+        return dict(self._data)
+
+
+class FakeApifyModels(FakeApify):
+    """FakeApify returning models, as apify_client 3.0.2 (requirements.txt) does."""
+
+    def actor(self, actor_id):
+        inner = super().actor(actor_id)
+
+        class _A:
+            def call(self, run_input=None, **kwargs):
+                return _Model(**inner.call(run_input=run_input, **kwargs))
+
+        return _A()
+
+    def dataset(self, dataset_id):
+        inner = super().dataset(dataset_id)
+
+        class _D:
+            def get(self):
+                return _Model(**inner.get())
+
+            def iterate_items(self):
+                return inner.iterate_items()
+
+        return _D()
+
+
 class TestRecordingClient:
+    def test_apify_client_3_models_record_items_and_cost(self, sample_facebook_posts_results):
+        """apify_client 3.x returns models: the call row still gets its items, cost and
+        usage_event_id (the Wave B integration run recorded items=NULL before the fix)."""
+        rec = CallRecorder(search_item_budget=3)
+        fake = FakeApifyModels({"a/b": sample_facebook_posts_results})
+        run = RecordingApifyClient(fake, rec, _meter()).actor("a/b").call(run_input={})
+        (call,) = rec.calls
+        assert call.items == 3 and call.cost_usd == 0.01
+        assert call.usage_event_id and call.usage_event_id.endswith(call.apify_run_id)
+        assert run["defaultDatasetId"]          # the actors read the run as a dict
+
     def test_search_calls_get_apify_max_items_and_budget(self, sample_facebook_posts_results):
         rec = CallRecorder(search_item_budget=3)
         fake = FakeApify({"a/b": sample_facebook_posts_results})
