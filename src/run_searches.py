@@ -1,19 +1,34 @@
-"""Main orchestrator: loads tasks from Excel (.xlsx), runs actors, and publishes to RabbitMQ."""
+"""Main orchestrator: loads tasks from Excel (.xlsx), runs actors, and publishes to RabbitMQ.
+
+    python -m src.run_searches [tasks.xlsx] [--platform]
+
+Metering (rate_limiting.md §2.1, §2.7): every Apify call goes through
+``usage_client.apify.run`` (admit → cap → run → one ``usage_events`` row per Apify run),
+attributed to the task's org. An xlsx row has no org column: the org is the theme's, from
+the decided theme → org map of the userdb importer (``import_tasks_xlsx.KEEP_THEMES`` /
+``RETIRED_THEMES``). A theme with no org is **refused** (no org, no spend; best-effort
+``usage_blocks(reason='missing_org')``) unless ``--platform`` is given, which runs it as
+internal work under the platform org (``usage_client.platform.platform_org_id``, scope
+``global`` — what ``platform_context`` builds, one context per usage kind; set
+``PLATFORM_ORG_ID`` if the ledger role can't read ``orgs``). Needs ``USAGE_DB_URI`` (or ``DATABASE_URI``) — without a ledger admission
+fails closed and nothing is bought.
+"""
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
-import sys
+import uuid
 from datetime import datetime
+from typing import Any, Optional
 
 from pika.exceptions import AMQPError
 
 from src.actors import get_actor
-from src.helpers.rabbitmq import close_client
-from src.helpers.serialization import publish_document
 from src.models.crawl_task import CrawlTask, load_tasks
+from src.worker.recording import SERVICE, CallRecorder, RecordingApifyClient, UsageMeter, instrument_actor
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +51,83 @@ CURRENT_THEME = os.getenv("CURRENT_THEME", CURRENT_THEME)
 # own `override_filters` value. Equivalent to forcing override_filters=True everywhere.
 OVERRIDE_FILTERED_CACHE = False
 
+DEFAULT_USAGE_SPOOL_DIR = os.path.join("cache", "usage_spool")
+
+
+def theme_org(theme: Optional[str]) -> Optional[int]:
+    """The org a theme's tasks spend for (the importer's decided map), or None."""
+    from src.scripts.import_tasks_xlsx import KEEP_THEMES, RETIRED_THEMES
+
+    return KEEP_THEMES.get(theme) or RETIRED_THEMES.get(theme)
+
+
+def task_meter(task: CrawlTask, *, session: str, platform: bool = False, ledger: Any = None) -> UsageMeter:
+    """The ``UsageMeter`` a hand-run task spends through. Raises ``usage_client.MissingOrg``
+    (after a best-effort ``usage_blocks`` row) when the task has no org and ``platform``
+    is off; ``LedgerUnavailable`` if the platform org can't be resolved."""
+    from usage_client import MissingOrg
+
+    event_key = f"run-searches:{session}:{task.task_id}"
+    org_id = theme_org(task.theme)
+    if org_id is not None:
+        return UsageMeter(org_id=org_id, event_key=event_key, ledger=ledger)
+    if platform:
+        from usage_client.platform import platform_org_id
+
+        return UsageMeter(org_id=platform_org_id(ledger), event_key=event_key, scope="global", ledger=ledger)
+    try:
+        if ledger is None:
+            from usage_client.ledger import get_ledger
+
+            ledger = get_ledger()
+        ledger.block(path=f"worker:{SERVICE}", tool="apify", kind="crawl", reason="missing_org")
+    except Exception as exc:
+        logger.error("could not write usage_blocks(missing_org): %s", exc)
+    raise MissingOrg(f"task {task.task_id} (theme {task.theme!r}) has no org: refused, nothing bought "
+                     f"(--platform runs it under the platform org)")
+
+
+def build_actor(task: CrawlTask, *, session: str, platform: bool = False, ledger: Any = None,
+                apify_client: Any = None):
+    """The task's actor on a client that meters every Apify call through usage_client."""
+    meter = task_meter(task, session=session, platform=platform, ledger=ledger)
+    if apify_client is None:
+        from apify_client import ApifyClient
+
+        from src.actors.actor import _get_apify_token
+
+        apify_client = ApifyClient(_get_apify_token())
+    recorder = CallRecorder()
+    actor = get_actor(task.actor_class, client=RecordingApifyClient(apify_client, recorder, meter))
+    instrument_actor(actor, recorder)  # purpose → usage kind (crawl / comments / profiles)
+    return actor
+
+
+def configure_usage_ledger():
+    from usage_client import ledger as usage_ledger
+
+    dsn = os.getenv("USAGE_DB_URI") or os.getenv("DATABASE_URI")
+    if not dsn:
+        logger.error("USAGE_DB_URI (or DATABASE_URI) is not set: admission fails closed, no task will run")
+    return usage_ledger.configure(dsn, spool_dir=os.getenv("USAGE_SPOOL_DIR") or DEFAULT_USAGE_SPOOL_DIR)
+
 
 if __name__ == "__main__":
-    xlsx_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_TASKS_CSV
+    parser = argparse.ArgumentParser(description="Run the xlsx crawl tasks (metered through usage_client).")
+    parser.add_argument("xlsx_path", nargs="?", default=DEFAULT_TASKS_CSV)
+    parser.add_argument("--platform", action="store_true",
+                        help="run tasks whose theme has no org under the platform org (internal work)")
+    args = parser.parse_args()
+    xlsx_path = args.xlsx_path
+
+    # Imported here, after argument parsing: src.helpers.rabbitmq connects to the broker
+    # at import time (and the helpers above stay importable without one, e.g. by tests).
+    from src.helpers.rabbitmq import close_client
+    from src.helpers.serialization import publish_document
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    usage_ledger = configure_usage_ledger()
+    session = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
     tasks = load_tasks(xlsx_path)
     logger.info("Loaded %d enabled tasks from %s", len(tasks), xlsx_path)
@@ -54,7 +141,7 @@ if __name__ == "__main__":
     for task in tasks:
         logger.info("Running task: %s %s", task.actor_class, task.search_params)
         try:
-            actor = get_actor(task.actor_class)
+            actor = build_actor(task, session=session, platform=args.platform, ledger=usage_ledger)
             kwargs = task.to_actor_kwargs()
             if OVERRIDE_FILTERED_CACHE:
                 kwargs["override_filters"] = True
