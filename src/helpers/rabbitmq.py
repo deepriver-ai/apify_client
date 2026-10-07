@@ -64,19 +64,29 @@ class RMQ():
             raise e
         return channel
 
-    def publish(self, message):
+    def _usable(self):
+        return (self.connection is not None and self.channel is not None
+                and not self.connection.is_closed and not self.channel.is_closed)
+
+    def reconnect(self):
+        self.close_connections()
+        self.clear_connection()
+        self.declarations()
+
+    def publish(self, message, _retry=True):
+        # A reconnect that failed (e.g. AMQP handshake timeout while the tunnel blips) used to
+        # leave channel=None for good: every later publish raised AttributeError, which is not
+        # an AMQP error, so nothing ever reconnected (2026-10-07: 5 paid runs published 0 docs).
+        # Now every publish first makes sure the connection is usable, and retries once.
         try:
+            if not self._usable():
+                self.reconnect()
             self.channel.basic_publish(exchange=RABBIT_EXCHANGE, routing_key=RABBIT_QUEUE, body=message)
         except (AMQPChannelError, AMQPConnectionError, AMQPError, ChannelClosed, ChannelError, ChannelWrongStateError, ConnectionClosed, ConnectionWrongStateError):
-            try:
-                self.close_connections()
-                self.clear_connection()
-                self.declarations()
-                self.publish(message)
-            except Exception as e:
-                raise e
-        except Exception as e:
-            raise e
+            if not _retry:
+                raise
+            self.reconnect()
+            self.publish(message, _retry=False)
         return None
 
     def close_client(self):
