@@ -125,6 +125,16 @@ Some actors override the order to reduce cost. For example, Facebook keyword sea
 
 Keep cheap filters before expensive network or LLM work where possible.
 
+Like thresholds gate the paid per-post enrichments: `get_comments_after_likes` (comments)
+and `enrich_author_after_likes` (author-profile scrape) — only posts whose `likes` exceed
+the threshold (strictly greater) get the extra Apify call; unset means every post. One
+helper implements it, `ApifyActor._gate_by_likes`, used by `facebook_page_posts`,
+`facebook_keyword_search` (both through the shared `enrich_page_authors` /
+`enrich_post_comments` in `facebook/posts.py`) and `tiktok_posts` (comments). Skipped posts
+are counted in the run funnel as `comments_skipped_likes` / `profiles_skipped_likes`; with
+no qualifying post no call is made (so nothing is recorded in `crawl_run_calls`). This
+applies to both entry points (`run_searches.py` and the crawl-run worker).
+
 ## Schema Conventions
 
 All models first populate the intermediate dict from `Document._empty_data()`. Keep new platform mappings as pure data mapping; enrichment belongs in actor pipeline stages or model enrichment methods.

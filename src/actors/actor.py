@@ -165,6 +165,27 @@ class ApifyActor:
             }
             self.filtered_documents.append(entry)
 
+    def _gate_by_likes(self, documents: List, threshold: Optional[float], stage: str) -> List:
+        """Posts that qualify for a paid per-post enrichment gated by an ``*_after_likes``
+        actor param (``get_comments_after_likes`` → ``stage='comments'``,
+        ``enrich_author_after_likes`` → ``stage='profiles'``).
+
+        ``threshold is None`` → every post (no gate). Otherwise only posts whose ``likes``
+        **exceed** the threshold (missing likes count as 0). Skipped posts are not
+        dropped from the run — they just don't get the extra Apify call — and are counted
+        in the funnel as ``<stage>_skipped_likes``.
+        """
+        if threshold is None:
+            return list(documents)
+        kept = [doc for doc in documents if (doc.data.get("likes") or 0) > threshold]
+        skipped = len(documents) - len(kept)
+        if skipped:
+            if not hasattr(self, "funnel"):
+                self.reset_funnel()
+            self.funnel[f"{stage}_skipped_likes"] += skipped
+            logger.info("%s gate (likes > %s): %d of %d posts qualify", stage, threshold, len(kept), len(documents))
+        return kept
+
     def _filter_cached_documents(self, documents: List, task_id: str, override: bool = False) -> List:
         """Skip docs previously cached as filtered-out for this task.
 

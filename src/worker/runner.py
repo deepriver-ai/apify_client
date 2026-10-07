@@ -15,7 +15,7 @@ import os
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from src.models.crawl_task import CrawlTask
@@ -234,11 +234,23 @@ def diff_params(message_params: Dict[str, Any], effective: Dict[str, Any]) -> Li
         if key not in effective or key in ("actor_class", "search_params"):
             continue
         a, b = _jsonable(value), _jsonable(effective[key])
-        if isinstance(a, str) and isinstance(b, str) and key == "min_date":
-            a, b = a[:19], b[:19]
+        if key == "min_date" and isinstance(a, str) and isinstance(b, str):
+            a, b = _instant(a), _instant(b)
         if a != b:
             diffs.append(key)
     return sorted(diffs)
+
+
+def _instant(value: str) -> Any:
+    """An ISO datetime string as a comparable instant: the backend sends ``min_date`` in
+    UTC while the worker reads ``window_since`` in the DB session's time zone, so the
+    same instant can print with different offsets. Naive values are compared as UTC;
+    unparseable strings compare verbatim."""
+    try:
+        dt_value = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return dt_value if dt_value.tzinfo else dt_value.replace(tzinfo=timezone.utc)
 
 
 # --------------------------------------------------------------------------- execution

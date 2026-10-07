@@ -350,7 +350,7 @@ Keys each actor reads (`kwargs.get` in `src/actors/**`), excluding the common on
 | actor_class | actor-specific keys |
 |---|---|
 | `facebook_keyword_search` | `enrich_author_after_likes`, `get_comments_after_likes`, `add_text_from_images`, `location_uid`, `recent_posts`, `snippet_max_len`, `stats_max_age_days`, `results_limit` |
-| `facebook_page_posts` | `add_text_from_images`, `download_*`, `add_subtitles`, `add_ai_transcription`, `stats_max_age_days`, `results_limit` |
+| `facebook_page_posts` | `enrich_author_after_likes`, `get_comments_after_likes` (read since 2026-10-06; before, the page actor fetched comments/profiles for every post), `add_text_from_images`, `download_*`, `add_subtitles`, `add_ai_transcription`, `stats_max_age_days`, `results_limit` |
 | `instagram_hashtags` / `instagram_profile_posts` | `keyword_search`, `results_type`, `stats_max_age_days`, `download_*`, `video_dir`, `results_limit` |
 | `instagram_profile_queenlike` | `scrape_type`, `output_mode`, `results_limit` |
 | `tiktok_posts` | `get_comments_after_likes`, `apify_input`, `results_limit` |
@@ -359,7 +359,10 @@ Keys each actor reads (`kwargs.get` in `src/actors/**`), excluding the common on
 | all (base pipeline) | `check_existing_elasticsearch`, `skip_existing_filter` (`actor.py`) |
 
 **Thresholds that drive cost.** `get_comments_after_likes` and
-`enrich_author_after_likes` gate the two paid enrichment calls. They are inputs to the
+`enrich_author_after_likes` gate the two paid enrichment calls (one shared gate,
+`ApifyActor._gate_by_likes`: only posts whose `likes` **exceed** the threshold — strictly
+greater — get the call; unset = every post; skipped posts land in the run funnel as
+`comments_skipped_likes` / `profiles_skipped_likes`). They are inputs to the
 estimate's high end (§7.1). `customer_ops` defaults are 100/100
 (`customer_ops/src/customer_ops/crawl_tasks.py:18-27`). `apify_input` (TikTok) is a raw
 passthrough to the actor input, so validation must reject any key in it that would

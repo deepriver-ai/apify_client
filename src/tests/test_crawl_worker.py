@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
@@ -26,7 +26,7 @@ from src.worker.recording import (
     RecordingApifyClient,
     instrument_actor,
 )
-from src.worker.runner import ACK, REQUEUE, WorkerDeps, build_crawl_kwargs, handle_message
+from src.worker.runner import ACK, REQUEUE, WorkerDeps, build_crawl_kwargs, diff_params, handle_message
 
 FB_PAGE = "https://www.facebook.com/QroMunicipio/"
 
@@ -336,6 +336,26 @@ class TestRunExecution:
         assert run["cost_usd"] == pytest.approx(0.02)
         assert isinstance(run["comments_fetched"], int)
 
+    def test_page_actor_like_thresholds_gate_comment_and_profile_calls(self, world, sample_facebook_posts_results):
+        """facebook_page_posts honours get_comments_after_likes / enrich_author_after_likes:
+        the comments call carries only the posts over the threshold, and no profiles call is
+        made when no post clears it (sample likes: 26, 10, 26, 203)."""
+        db, apify, deps, _ = world
+        db.tasks[159].update(get_comments=True, max_comments=30, enrich_followers=True,
+                             actor_params={"add_text_from_images": False, "get_comments_after_likes": 30,
+                                           "enrich_author_after_likes": 1000})
+        with _no_es():
+            handle_message(json.dumps(_message()), deps)
+        run = db.runs[1234]
+        assert run["status"] == "succeeded", run.get("error")
+        assert sorted(c["purpose"] for c in db.calls.values()) == ["comments", "search"]   # no profiles call
+        (comments_call,) = [c for c in apify.calls if c["actor_id"] == "apify/facebook-comments-scraper"]
+        over = [i["url"] for i in sample_facebook_posts_results if (i.get("likes") or 0) > 30]
+        assert [u["url"] for u in comments_call["run_input"]["startUrls"]] == over and len(over) == 1
+        funnel = run["stats"]["funnel"]
+        assert funnel["comments_skipped_likes"] == 3 and funnel["profiles_skipped_likes"] >= 1
+        assert run["profiles_scraped"] == 0
+
     def test_publish_failure_is_partial_with_cost_kept(self, world):
         db, apify, deps, _ = world
 
@@ -418,6 +438,25 @@ class TestRunExecution:
         run = db.runs[1234]
         assert run["stats"]["message_params_diff"] == ["max_comments"]
         assert run["stats"]["effective_params"]["max_comments"] == 15
+
+    def test_backend_window_message_shows_no_diff(self, world):
+        """The backend sends the run's window as min_date = window_since in UTC with period
+        null (design §6.2); the worker reads window_since in the DB session's zone. Same
+        instant → no diff; a different instant still shows."""
+        db, apify, deps, _ = world
+        db.tasks[159]["period"] = "w"
+        db.runs[1234]["window_since"] = datetime(2026, 9, 29, 6, 4, 11, 532871,
+                                                 tzinfo=timezone(timedelta(hours=-6)))
+        msg = _message()
+        msg["params"].update(min_date="2026-09-29T12:04:11.532871+00:00", period=None)
+        with _no_es():
+            handle_message(json.dumps(msg), deps)
+        assert "message_params_diff" not in db.runs[1234]["stats"]
+
+        assert diff_params({"min_date": "2026-09-29T12:04:11+00:00"},
+                           {"min_date": datetime(2026, 9, 29, 12, 5, tzinfo=timezone.utc)}) == ["min_date"]
+        assert diff_params({"min_date": "2026-09-29T12:04:11"},
+                           {"min_date": datetime(2026, 9, 29, 12, 4, 11, tzinfo=timezone.utc)}) == []
 
     def test_schedule_bookkeeping(self, world):
         db, apify, deps, _ = world

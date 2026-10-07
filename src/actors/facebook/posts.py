@@ -231,76 +231,111 @@ class FacebookPagePostsActor(ApifyActor):
     def _enrich_user_author(self, documents: List, **kwargs) -> List:
         """Enrich posts with page profile data via apify/facebook-pages-scraper.
 
-        Follows the same pattern as Instagram's _enrich_user_author:
-        apply cached stats first, collect stale profiles, bulk scrape,
-        map results back to posts.
+        Follows the same pattern as Instagram's _enrich_user_author: apply cached
+        stats first, collect stale profiles, bulk scrape, map results back.
+        ``enrich_author_after_likes`` gates the scrape (see ``enrich_page_authors``).
         """
-        max_age_days = kwargs.get("stats_max_age_days", 90)
-
-        # Always apply cached stats, even if enrich_followers is not set
-        profiles_to_scrape: Dict[str, str] = {}  # profile_url → page_name
-        for doc in documents:
-            doc.apply_cached_user_author()
-            if doc.needs_user_author_update(max_age_days):
-                profile_url = doc.data.get("profile_url", "")
-                page_name = _extract_facebook_page_name(profile_url)
-                if page_name:
-                    profiles_to_scrape[profile_url] = page_name
-
-        if not profiles_to_scrape or not kwargs.get("enrich_followers"):
-            if not kwargs.get("enrich_followers"):
-                logger.info("enrich_followers not set, applied cached stats only for %d posts", len(documents))
-            else:
-                logger.info("All %d profiles have fresh stats, skipping scraper", len(documents))
-            return documents
-
-        # Deduplicate page URLs and bulk scrape
-        page_urls = list(set(profiles_to_scrape.keys()))
-        logger.info("Scraping profiles for %d Facebook pages", len(page_urls))
-
-        profile_actor = FacebookProfileActor(self.client)
-        raw_profiles = profile_actor.scrape_pages(page_urls)
-
-        # Index results by every known page-name representation so the
-        # lookup succeeds regardless of which key on the profile matches
-        # the post's profile_url.
-        profiles_by_page = index_profiles_by_page_name(raw_profiles)
-
-        # Map results back to posts
-        for doc in documents:
-            profile_url = doc.data.get("profile_url", "")
-            page_name = profiles_to_scrape.get(profile_url)
-            if not page_name:
-                continue
-            profile_data = profiles_by_page.get(page_name)
-            if not profile_data:
-                continue
-            mapped = FacebookProfileActor.map_profile(profile_data)
-            doc.save_user_author_stats(mapped)
-
-        logger.info("Enriched %d profiles with page stats", len(raw_profiles))
-        return documents
+        return enrich_page_authors(self, documents, **kwargs)
 
     def _enrich_comments(self, documents: List, **kwargs) -> List:
-        """Scrape comments for each post via apify/facebook-comments-scraper."""
-        if not kwargs.get("get_comments"):
-            return documents
+        """Scrape comments via apify/facebook-comments-scraper for every post with a URL,
+        or — with ``get_comments_after_likes`` — only for posts whose likes exceed it."""
+        return enrich_post_comments(self, documents, **kwargs)
 
-        max_comments = kwargs.get("max_comments", 15)
-        post_urls = [doc.data.get("url") for doc in documents if doc.data.get("url")]
-        if not post_urls:
-            return documents
 
-        logger.info("Scraping comments for %d Facebook posts (max %d per post)", len(post_urls), max_comments)
+# --- Facebook enrichment stages shared by the page and keyword actors -------------
 
-        comments_actor = FacebookCommentsActor(self.client)
-        raw_comments = comments_actor.scrape_comments(post_urls, max_comments=max_comments)
-        comments_by_url = FacebookCommentsActor.group_by_post_url(raw_comments)
 
-        for doc in documents:
-            url = doc.data.get("url")
-            if url:
-                doc.data["comments"] = comments_by_url.get(url, [])
+def enrich_page_authors(actor: ApifyActor, documents: List, **kwargs) -> List:
+    """``_enrich_user_author`` for Facebook posts (page actor and keyword actor).
 
-        logger.info("Enriched Facebook posts with %d total comments", len(raw_comments))
+    Always applies cached stats. When ``enrich_followers`` is set, bulk-scrapes the
+    stale page profiles via ``FacebookProfileActor`` and saves them to
+    ``UsersManagement``. ``enrich_author_after_likes`` (int, optional): only posts whose
+    ``likes`` exceed it are scraped (``ApifyActor._gate_by_likes``); cached stats still
+    apply to all posts. ``stats_max_age_days`` (default 90).
+    """
+    max_age_days = kwargs.get("stats_max_age_days", 90)
+
+    stale = []
+    for doc in documents:
+        doc.apply_cached_user_author()  # always, even if enrich_followers is not set
+        if doc.needs_user_author_update(max_age_days):
+            stale.append(doc)
+
+    if not kwargs.get("enrich_followers"):
+        logger.info("enrich_followers not set, applied cached stats only for %d posts", len(documents))
         return documents
+
+    profiles_to_scrape: Dict[str, str] = {}  # profile_url → page_name
+    for doc in actor._gate_by_likes(stale, kwargs.get("enrich_author_after_likes"), "profiles"):
+        profile_url = doc.data.get("profile_url", "")
+        page_name = _extract_facebook_page_name(profile_url)
+        if page_name:
+            profiles_to_scrape[profile_url] = page_name
+
+    if not profiles_to_scrape:
+        logger.info("No stale qualifying profiles among %d posts, skipping scraper", len(documents))
+        return documents
+
+    # Deduplicate page URLs and bulk scrape
+    page_urls = list(set(profiles_to_scrape.keys()))
+    logger.info("Scraping profiles for %d Facebook pages", len(page_urls))
+
+    profile_actor = FacebookProfileActor(actor.client)
+    raw_profiles = profile_actor.scrape_pages(page_urls)
+
+    # Index results by every known page-name representation so the lookup succeeds
+    # regardless of which key on the profile matches the post's profile_url.
+    profiles_by_page = index_profiles_by_page_name(raw_profiles)
+
+    for doc in documents:
+        profile_url = doc.data.get("profile_url", "")
+        page_name = profiles_to_scrape.get(profile_url)
+        if not page_name:
+            continue
+        profile_data = profiles_by_page.get(page_name)
+        if not profile_data:
+            continue
+        mapped = FacebookProfileActor.map_profile(profile_data)
+        doc.save_user_author_stats(mapped)
+
+    logger.info("Enriched %d profiles with page stats", len(raw_profiles))
+    return documents
+
+
+def enrich_post_comments(actor: ApifyActor, documents: List, only_with_comments: bool = False,
+                         **kwargs) -> List:
+    """``_enrich_comments`` for Facebook posts (page actor and keyword actor).
+
+    When ``get_comments`` is set, one ``FacebookCommentsActor`` call scrapes up to
+    ``max_comments`` (default 15) per qualifying post: posts with a URL (and, with
+    ``only_with_comments``, a positive ``n_comments``) whose ``likes`` exceed
+    ``get_comments_after_likes`` when given (``ApifyActor._gate_by_likes``). No
+    qualifying post → no call. Every post with a URL gets ``comments`` set when a call
+    was made (``[]`` for the ones not scraped).
+    """
+    if not kwargs.get("get_comments"):
+        return documents
+
+    max_comments = kwargs.get("max_comments", 15)
+    candidates = [doc for doc in documents if doc.data.get("url")
+                  and (not only_with_comments or (doc.data.get("n_comments") or 0) > 0)]
+    qualifying = actor._gate_by_likes(candidates, kwargs.get("get_comments_after_likes"), "comments")
+    post_urls = [doc.data["url"] for doc in qualifying]
+    if not post_urls:
+        return documents
+
+    logger.info("Scraping comments for %d Facebook posts (max %d per post)", len(post_urls), max_comments)
+
+    comments_actor = FacebookCommentsActor(actor.client)
+    raw_comments = comments_actor.scrape_comments(post_urls, max_comments=max_comments)
+    comments_by_url = FacebookCommentsActor.group_by_post_url(raw_comments)
+
+    for doc in documents:
+        url = doc.data.get("url")
+        if url:
+            doc.data["comments"] = comments_by_url.get(url, [])
+
+    logger.info("Enriched Facebook posts with %d total comments", len(raw_comments))
+    return documents

@@ -373,6 +373,45 @@ class TestEnrichUserAuthor:
             assert "QroMunicipio" in page_urls[0]
 
 
+    # --- enrich_author_after_likes (same gate as facebook_keyword_search) ---
+
+    @staticmethod
+    def _posts_with_likes(sample, likes):
+        posts = []
+        for i, n in enumerate(likes):
+            post = FacebookPost.from_facebook(sample[0])
+            post.data["profile_url"] = f"https://www.facebook.com/page{i}/"
+            post.data["likes"] = n
+            posts.append(post)
+        return posts
+
+    def test_author_threshold_scrapes_only_posts_over_it(self, actor, sample_facebook_posts_results):
+        posts = self._posts_with_likes(sample_facebook_posts_results, [5, 50, 30, None])
+        actor.reset_funnel()
+        with patch.object(FacebookProfileActor, "scrape_pages", return_value=[]) as mock_scrape:
+            actor._enrich_user_author(posts, enrich_followers=True, enrich_author_after_likes=30)
+        (page_urls,) = mock_scrape.call_args[0]
+        assert page_urls == ["https://www.facebook.com/page1/"]          # 50 > 30; 30 is not
+        assert actor.funnel["profiles_skipped_likes"] == 3
+
+    def test_author_threshold_above_all_makes_no_call(self, actor, sample_facebook_posts_results):
+        posts = self._posts_with_likes(sample_facebook_posts_results, [5, 50])
+        with patch.object(FacebookProfileActor, "scrape_pages") as mock_scrape:
+            result = actor._enrich_user_author(posts, enrich_followers=True, enrich_author_after_likes=1000)
+        mock_scrape.assert_not_called()
+        actor.client.actor.assert_not_called()
+        assert result == posts
+
+    def test_author_without_threshold_scrapes_every_stale_profile(self, actor, sample_facebook_posts_results):
+        posts = self._posts_with_likes(sample_facebook_posts_results, [0, 5])
+        actor.reset_funnel()
+        with patch.object(FacebookProfileActor, "scrape_pages", return_value=[]) as mock_scrape:
+            actor._enrich_user_author(posts, enrich_followers=True)
+        assert sorted(mock_scrape.call_args[0][0]) == ["https://www.facebook.com/page0/",
+                                                       "https://www.facebook.com/page1/"]
+        assert "profiles_skipped_likes" not in actor.funnel
+
+
 class TestFacebookCommentsActorMapComment:
     """Test FacebookCommentsActor.map_comment() field mapping."""
 
@@ -474,3 +513,38 @@ class TestEnrichComments:
                 ["https://www.facebook.com/QroMunicipio/posts/pfbid02ABC123"],
                 max_comments=25,
             )
+
+    # --- get_comments_after_likes (same gate as facebook_keyword_search / tiktok) ---
+
+    def _posts(self, sample, likes):
+        posts = [FacebookPost.from_facebook(sample[0]) for _ in likes]
+        for i, (post, n) in enumerate(zip(posts, likes)):
+            post.data["url"] = f"https://www.facebook.com/QroMunicipio/posts/p{i}"
+            post.data["likes"] = n
+        return posts
+
+    def test_comments_threshold_scrapes_only_posts_over_it(self, actor, sample_facebook_posts_results):
+        posts = self._posts(sample_facebook_posts_results, [10, 11, 200, None])
+        actor.reset_funnel()
+        with patch.object(FacebookCommentsActor, "scrape_comments", return_value=[]) as mock_scrape:
+            result = actor._enrich_comments(posts, get_comments=True, max_comments=30,
+                                            get_comments_after_likes=10)
+        mock_scrape.assert_called_once_with(
+            ["https://www.facebook.com/QroMunicipio/posts/p1", "https://www.facebook.com/QroMunicipio/posts/p2"],
+            max_comments=30,
+        )
+        assert actor.funnel["comments_skipped_likes"] == 2                 # 10 (not > 10) and None
+        assert all(p.data["comments"] == [] for p in result)              # set for every post once a call ran
+
+    def test_comments_threshold_above_all_makes_no_call(self, actor, sample_facebook_posts_results):
+        posts = self._posts(sample_facebook_posts_results, [10, 200])
+        with patch.object(FacebookCommentsActor, "scrape_comments") as mock_scrape:
+            actor._enrich_comments(posts, get_comments=True, get_comments_after_likes=500)
+        mock_scrape.assert_not_called()
+        actor.client.actor.assert_not_called()
+
+    def test_comments_without_threshold_keeps_every_post(self, actor, sample_facebook_posts_results):
+        posts = self._posts(sample_facebook_posts_results, [0, None])   # no n_comments gate on the page actor
+        with patch.object(FacebookCommentsActor, "scrape_comments", return_value=[]) as mock_scrape:
+            actor._enrich_comments(posts, get_comments=True)
+        assert len(mock_scrape.call_args[0][0]) == 2
