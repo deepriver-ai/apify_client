@@ -110,15 +110,9 @@ class TikTokPostsActor(ApifyActor):
             return documents
 
         max_comments = kwargs.get("max_comments", 15)
-        likes_threshold = kwargs.get("get_comments_after_likes")
-        post_urls = []
-        for doc in documents:
-            url = doc.data.get("url")
-            if not url:
-                continue
-            if likes_threshold is not None and (doc.data.get("likes") or 0) <= likes_threshold:
-                continue
-            post_urls.append(url)
+        with_url = [doc for doc in documents if doc.data.get("url")]
+        qualifying = self._gate_by_likes(with_url, kwargs.get("get_comments_after_likes"), "comments")
+        post_urls = [doc.data["url"] for doc in qualifying]
         if not post_urls:
             return documents
 

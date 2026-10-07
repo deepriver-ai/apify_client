@@ -350,7 +350,7 @@ Keys each actor reads (`kwargs.get` in `src/actors/**`), excluding the common on
 | actor_class | actor-specific keys |
 |---|---|
 | `facebook_keyword_search` | `enrich_author_after_likes`, `get_comments_after_likes`, `add_text_from_images`, `location_uid`, `recent_posts`, `snippet_max_len`, `stats_max_age_days`, `results_limit` |
-| `facebook_page_posts` | `add_text_from_images`, `download_*`, `add_subtitles`, `add_ai_transcription`, `stats_max_age_days`, `results_limit` |
+| `facebook_page_posts` | `enrich_author_after_likes`, `get_comments_after_likes` (read since 2026-10-06; before, the page actor fetched comments/profiles for every post), `add_text_from_images`, `download_*`, `add_subtitles`, `add_ai_transcription`, `stats_max_age_days`, `results_limit` |
 | `instagram_hashtags` / `instagram_profile_posts` | `keyword_search`, `results_type`, `stats_max_age_days`, `download_*`, `video_dir`, `results_limit` |
 | `instagram_profile_queenlike` | `scrape_type`, `output_mode`, `results_limit` |
 | `tiktok_posts` | `get_comments_after_likes`, `apify_input`, `results_limit` |
@@ -359,7 +359,10 @@ Keys each actor reads (`kwargs.get` in `src/actors/**`), excluding the common on
 | all (base pipeline) | `check_existing_elasticsearch`, `skip_existing_filter` (`actor.py`) |
 
 **Thresholds that drive cost.** `get_comments_after_likes` and
-`enrich_author_after_likes` gate the two paid enrichment calls. They are inputs to the
+`enrich_author_after_likes` gate the two paid enrichment calls (one shared gate,
+`ApifyActor._gate_by_likes`: only posts whose `likes` **exceed** the threshold — strictly
+greater — get the call; unset = every post; skipped posts land in the run funnel as
+`comments_skipped_likes` / `profiles_skipped_likes`). They are inputs to the
 estimate's high end (§7.1). `customer_ops` defaults are 100/100
 (`customer_ops/src/customer_ops/crawl_tasks.py:18-27`). `apify_input` (TikTok) is a raw
 passthrough to the actor input, so validation must reject any key in it that would
@@ -460,6 +463,38 @@ New wiring in `apify_client`:
   documents to the document-processing vhost (Q4).
 - Local runs use `document_processing_dev` + `dev_crawl_runs` (workspace `CLAUDE.md`
   §Environments).
+
+#### 6.1.1 Worker as implemented (2026-10-06, `src/run_crawl_worker.py`, `src/worker/`)
+
+Points the code had to settle. The message shape above is unchanged.
+- **Missing org**: ack + error log as specified, and the `queued` run is also set
+  `failed` ("message missing org_id") so it does not hold the one-live-run slot. No
+  `usage_blocks` row: the table doesn't exist yet and the worker role has no grant on it.
+- **What wins**: the run row's `max_items` (≤ task `max_results`), `window_since`
+  (replaces the task's `min_date`/`period`), `dry_run` and `params.override_filters`;
+  everything else comes from the task row through `CrawlTask.from_db_row()` +
+  `to_actor_kwargs()`. Message `params` are only diffed (`stats.message_params_diff`).
+- **R2**: with no window, `google_news` gets `timeframe="all"` (its built-in default
+  is `"1d"`) unless the task sets `timeframe` in `actor_params`.
+- **Item cap**: the paid-item budget across `search` calls is
+  `max_items × len(search_params)` for `cap_scope='per_param'`, else `max_items`. It is
+  passed to Apify as `max_items` on each search call, and a spent budget stops further
+  calls. Enrichment calls (profiles, comments) are not item-capped.
+- **Cost cap**: min(message `max_cost_usd`, task `max_cost_usd_per_run`, run
+  `admitted_usd`). It is passed as `max_total_charge_usd` (honoured by pay-per-event
+  actors), and further calls stop once it is spent.
+- **`crawl_run_calls.purpose`** comes from the pipeline stage the call runs in
+  (`_enrich_user_author` → profiles, `_enrich_comments` → comments, `_download_video` →
+  video, other enrichment → other, else search). `items` is the dataset `itemCount`.
+  `items_paid` sums the search calls (comments calls for `kind='comments'`).
+- **Dry runs** still fill `items_new` / `attached_news_published` with the
+  would-be-published counts, so the §9.2 parallel run can compare yields.
+- **Comments runs** read posts by `crawl_comment_request_posts.run_id`, so **the
+  approve endpoint must set `run_id` on each post**. `max_comments` is the tier depth.
+- **Schedules**: only `trigger='schedule'` runs update `crawl_schedules`. `partial` counts
+  as a failure there, so the window does not advance.
+- **Not in the worker**: the stale-heartbeat reaper (§5.2) and the WS-4
+  `classify_users` pass (Q9).
 
 ### 6.2 Scheduling and newest-first incrementality
 

@@ -6,7 +6,9 @@ Guidance for AI coding agents working in this repository.
 
 This is an Apify-based media ingestion and normalization pipeline. It scrapes news and social media content, maps raw actor output into a common intermediate `Document.data` shape, filters/enriches it in staged actor pipelines, normalizes it through `src/schema/`, and publishes final envelopes to RabbitMQ.
 
-Primary entry point: `src/run_searches.py`.
+Primary entry point: `src/run_searches.py` (xlsx hand runs).
+
+Queue entry point: `src/run_crawl_worker.py` — consumes `crawl_run` messages, executes userdb `crawl_runs` (design `docs/db/crawl_tasks.md` §6.1; see CLAUDE.md §Entry Point).
 
 Current task file: `tasks.xlsx`.
 
@@ -22,6 +24,7 @@ source setup_local.sh
 python -m pytest src/tests/ -v
 python -m src.run_searches
 python -m src.run_searches custom.xlsx
+python -m src.run_crawl_worker            # queue worker (see env below); --once for a single message
 ```
 
 `setup_local.sh` adds this repo and `/Users/oscarcuellar/ocn/media/elastic_client` to `PYTHONPATH`. The Elasticsearch existing-document filter is best-effort: if the package or connection is unavailable, the pipeline logs a warning and keeps documents.
@@ -39,6 +42,15 @@ Important variables:
 - `MONGO_USER`, `MONGO_PASSWORD`, `MONGO_HOST`, `MONGO_PORT`, `MONGO_AUTHDB` for MongoDB.
 - `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `LLM_CACHE_PATH` for LLM extraction/filtering.
 
+Crawl-run queue worker (`src/run_crawl_worker.py`) — in addition to `APIFI_API_TOKEN` and the `RABBIT_*` document connection (where documents are published; check `RABBIT_VIRTUAL_HOST`):
+
+- `DATABASE_URI` — userdb as role `crawler_worker` (least privilege; `media-backend-paid/docs/db/migrations/2026-10-06_crawl_worker_role_userdb.sql`). Local runs: a throwaway/local DB, never stg.
+- `CRAWL_RUNS_RABBIT_VIRTUAL_HOST`, `CRAWL_RUNS_QUEUE` (required) — the runs queue it consumes. Local: `document_processing_dev` + `dev_crawl_runs`. `CRAWL_RUNS_RABBIT_HOST/PORT/USER/PASSWORD` default to the `RABBIT_*` values; `CRAWL_RUNS_RABBIT_HEARTBEAT` (60).
+- `CRAWL_WORKER_HEARTBEAT_SECS` (60), `CRAWL_WORKER_DB_RETRY_SECS` (30, delay before requeue when userdb is unreachable), `CRAWL_WORKER_SPOOL_PATH` (`cache/crawl_worker_spool.jsonl`), `CRAWL_WORKER_OUTPUT_DIR` (`cache/runs`, dry runs).
+- `CRAWL_USE_USAGE_CLIENT=1` — route Apify calls through `usage_client.apify.run` (off until that stub is implemented).
+
+Never point a local worker at the repo `.env` as-is: it sets `RABBIT_VIRTUAL_HOST=document_processing_prod`.
+
 Tests mock MongoDB before importing `src` modules in `src/tests/conftest.py`, so a running MongoDB is not required for pytest.
 
 ## Repository Map
@@ -51,7 +63,8 @@ Tests mock MongoDB before importing `src` modules in `src/tests/conftest.py`, so
 - `src/models/*_post.py` map raw platform records into the intermediate schema.
 - `src/models/sources_management.py` loads source metadata from MongoDB and tracks unknown news domains in `cache/unknown_sources.json`.
 - `src/models/users_management.py` caches social author stats/location in `cache/users.json`.
-- `src/models/crawl_task.py` parses task rows from `tasks.xlsx`.
+- `src/models/crawl_task.py` parses task rows from `tasks.xlsx` (`from_csv_row`) and from userdb `crawl_tasks` (`from_db_row`).
+- `src/worker/` is the crawl-run queue worker: `runner.py` (message → claimed run → actor → funnel/cost → terminal status), `recording.py` (recording Apify client: one `crawl_run_calls` row per call, item/cost budgets), `db.py` (userdb SQL as `crawler_worker`, JSONL spool for cost writes).
 - `src/models/news_parser/` fetches and extracts article HTML content.
 - `src/schema/` contains declarative normalization schemas and parsers.
 - `src/helpers/` contains integration helpers for language, geocoding, MongoDB, RabbitMQ, HTML cleaning, and strings.
@@ -111,6 +124,16 @@ raw Apify results
 Some actors override the order to reduce cost. For example, Facebook keyword search applies LLM filtering before expensive author/location/comment enrichment, and Twitter skips author enrichment because tweet payloads already include profile metadata.
 
 Keep cheap filters before expensive network or LLM work where possible.
+
+Like thresholds gate the paid per-post enrichments: `get_comments_after_likes` (comments)
+and `enrich_author_after_likes` (author-profile scrape) — only posts whose `likes` exceed
+the threshold (strictly greater) get the extra Apify call; unset means every post. One
+helper implements it, `ApifyActor._gate_by_likes`, used by `facebook_page_posts`,
+`facebook_keyword_search` (both through the shared `enrich_page_authors` /
+`enrich_post_comments` in `facebook/posts.py`) and `tiktok_posts` (comments). Skipped posts
+are counted in the run funnel as `comments_skipped_likes` / `profiles_skipped_likes`; with
+no qualifying post no call is made (so nothing is recorded in `crawl_run_calls`). This
+applies to both entry points (`run_searches.py` and the crawl-run worker).
 
 ## Schema Conventions
 
