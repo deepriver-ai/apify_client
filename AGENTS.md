@@ -12,7 +12,9 @@ Queue entry point: `src/run_crawl_worker.py` — consumes `crawl_run` messages, 
 
 Current task file: `tasks.xlsx`.
 
-Current runtime theme filter: `CURRENT_THEME = "queretaro"` in `src/run_searches.py`.
+Current runtime theme filter: `CURRENT_THEME = "morelia_descifra"` in `src/run_searches.py` (the last assignment wins; the `CURRENT_THEME` env var overrides it).
+
+Rate limiting: this repo **records** Apify spend and admits each call at run time through `usage_client.apify.run`; the backend admits crawl runs at request time. Spec `business_agent/docs/plans/rate_limiting.md` (media workspace, §2.7); summary of role, contract, refusals, event ids, env, packaging, tests and known gaps in CLAUDE.md §Usage metering.
 
 ## Setup And Commands
 
@@ -20,7 +22,7 @@ Use Python 3. Dependencies are listed in `requirements.txt`.
 
 ```bash
 pip install -r requirements.txt
-pip install -e ../usage_client            # required: every Apify call is metered through it
+pip install -e ../usage_client            # required: every Apify call is metered through it (images: Q26, see CLAUDE.md §Usage metering — the Dockerfile does not install it yet)
 source setup_local.sh
 python -m pytest src/tests/ -v
 python -m src.run_searches
@@ -43,7 +45,7 @@ Important variables:
 - `RABBIT_HOST`, `RABBIT_PORT`, `RABBIT_USER`, `RABBIT_PASSWORD`, `RABBIT_EXCHANGE`, `RABBIT_QUEUE`, `RABBIT_VIRTUAL_HOST` for RabbitMQ.
 - `MONGO_USER`, `MONGO_PASSWORD`, `MONGO_HOST`, `MONGO_PORT`, `MONGO_AUTHDB` for MongoDB.
 - `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `LLM_CACHE_PATH` for LLM extraction/filtering.
-- `USAGE_DB_URI` — the `usage_client` ledger (userdb: `usage_limits` / `usage_events` / `usage_blocks`); defaults to `DATABASE_URI`. **Every Apify call** (worker and `run_searches.py`) goes through `usage_client.apify.run`: admitted against the org's limits (Apify $15/day per org by default), capped, recorded as one `usage_events` row per Apify run. No ledger → admission fails closed → nothing is bought. `USAGE_SPOOL_DIR` (`cache/usage_spool`) holds `usage_events` writes that failed, replayed later. `PLATFORM_ORG_ID` (optional) overrides the platform org lookup for `run_searches.py --platform`.
+- `USAGE_DB_URI` — the `usage_client` ledger (userdb: `usage_limits` / `usage_events` / `usage_blocks`); defaults to `DATABASE_URI`. **Every Apify call** (worker and `run_searches.py`) goes through `usage_client.apify.run`: admitted against the org's limits (Apify $15/day per org by default), capped, recorded as one `usage_events` row per Apify run. No ledger → admission fails closed → nothing is bought. `USAGE_SPOOL_DIR` (`cache/usage_spool`) holds `usage_events` writes that failed, replayed later. `PLATFORM_ORG_ID` (optional) overrides the platform org lookup (`public_id='deepriver-platform'`) for `run_searches.py --platform`. `USAGE_SPOOL_DIR` must be a persistent volume in k8s. Event ids: `apify-client:<event_key>:<org>:<kind>:<Apify run id>` (Q32).
 
 Hand runs (`run_searches.py`): each task spends for its theme's org (the importer's theme → org map, `src/scripts/import_tasks_xlsx.py` `KEEP_THEMES` / `RETIRED_THEMES`). A theme with no org is refused (no org, no spend; `usage_blocks(missing_org)`) unless `--platform`.
 
@@ -53,7 +55,7 @@ Crawl-run queue worker (`src/run_crawl_worker.py`) — in addition to `APIFI_API
 - `CRAWL_RUNS_RABBIT_VIRTUAL_HOST`, `CRAWL_RUNS_QUEUE` (required) — the runs queue it consumes. Local: `document_processing_dev` + `dev_crawl_runs`. `CRAWL_RUNS_RABBIT_HOST/PORT/USER/PASSWORD` default to the `RABBIT_*` values; `CRAWL_RUNS_RABBIT_HEARTBEAT` (60).
 - `CRAWL_WORKER_HEARTBEAT_SECS` (60), `CRAWL_WORKER_DB_RETRY_SECS` (30, delay before requeue when userdb is unreachable), `CRAWL_WORKER_SPOOL_PATH` (`cache/crawl_worker_spool.jsonl`), `CRAWL_WORKER_OUTPUT_DIR` (`cache/runs`, dry runs).
 - `USAGE_DB_URI` / `USAGE_SPOOL_DIR` as above (the worker refuses to start with neither `USAGE_DB_URI` nor `DATABASE_URI`). The `crawler` role holds the ledger grants (`2026-10-07_crawler_usage_grants_userdb.sql`).
-- Admission refusals (`AdmissionRefused`, `src/worker/runner.py` docstring): `over_limit` / `per_request_cap` before any Apify call → run `blocked` (schedule untouched, so the next tick retries); `ledger_unreachable` before any call → run released to `queued` and the message requeued after `CRAWL_WORKER_DB_RETRY_SECS`; any refusal after a paid call → `partial`. A message without a valid `org_id` → `usage_blocks(path='worker:apify-client', reason='missing_org')` + run `failed` + ack.
+- Admission refusals (`AdmissionRefused`, `src/worker/runner.py` docstring): `over_limit` / `per_request_cap` before any Apify call → run `blocked` (schedule untouched, so the next tick retries); `ledger_unreachable` before any call → run released to `queued` and the message nacked with requeue after `CRAWL_WORKER_DB_RETRY_SECS`; any refusal after a paid call → `partial`. A message without a valid `org_id` → `usage_blocks(path='worker:apify-client', reason='missing_org')` + run `failed` + ack.
 
 Never point a local worker at the repo `.env` as-is: it sets `RABBIT_VIRTUAL_HOST=document_processing_prod`.
 

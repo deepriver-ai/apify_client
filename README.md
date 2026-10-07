@@ -374,7 +374,11 @@ Language codes are normalized to ISO 639-1 via `normalize_language()` — accept
 ```bash
 python -m src.run_searches                 # uses tasks.xlsx by default
 python -m src.run_searches custom.xlsx     # custom task file
+python -m src.run_searches --platform      # themes with no org run under the platform org
+python -m src.run_crawl_worker             # crawl_run queue worker (docs/db/crawl_tasks.md §6.1)
 ```
+
+Every Apify call (both entry points) is admitted, capped and recorded through `usage_client.apify.run` (per-org rate limiting, `business_agent/docs/plans/rate_limiting.md` in the media workspace). It needs `pip install -e ../usage_client` and `USAGE_DB_URI` (or `DATABASE_URI`); without a ledger nothing is bought. A task whose theme has no org is refused unless `--platform`. Details: CLAUDE.md §Usage metering.
 
 ## Actor registry (`src/actors/__init__.py`)
 

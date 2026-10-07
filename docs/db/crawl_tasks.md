@@ -1,7 +1,8 @@
 # Crawl tasks in userdb — design (draft)
 
-Status: **draft for Oscar's review, 2026-10-05.** Docs only: no DDL applied, no DB
-writes, no code changes. The proposed DDL is in
+Status: **drafted 2026-10-05 for Oscar's review; since implemented.** The crawl tables are in
+`media-backend-paid/db/user_db/schema.sql`, the queue worker is described in §6.1.1, and every
+Apify call is metered through `usage_client` since 2026-10-07 (§6.1.1). The original DDL is in
 [`media-backend-paid/docs/db/migrations/2026-10-05_crawl_tasks_userdb.sql`](../../../media-backend-paid/docs/db/migrations/2026-10-05_crawl_tasks_userdb.sql).
 The text proposed for `media-backend-paid/docs/DATABASE_POSTGRES.md` is in
 [Appendix A](#appendix-a--proposed-section-for-media-backend-paiddocsdatabase_postgresmd).
@@ -28,7 +29,7 @@ WS-7a ("queue tasks — unblocks recurrence everywhere").
    (agent_framework §5.1). Each Apify run also writes its cost to the `usage_events`
    ledger through `usage_client.apify.run` (`rate_limiting.md` §2.7; §6.1.1).
 5. Hooks for **pre-run range estimates** and **caps**: admission plus `maxItems`
-   capped to the remaining budget (`rate_limiting.md` §6 "Apify runs", §7
+   capped to the remaining budget (`rate_limiting.md` §2.5 admission paths, §2.6–§2.7
    `usage_client.apify`).
 6. Comments-on-demand as a first-class request: post selection, an exact estimate,
    then purchase (agent_framework §5.3; `src/scripts/select_posts_for_comments.py`,
@@ -36,7 +37,7 @@ WS-7a ("queue tasks — unblocks recurrence everywhere").
 
 **Non-goals**
 - The metering tables themselves (`usage_events`, `usage_limits`, `usage_blocks`) and
-  the `usage_client` library. Those are specified in `rate_limiting.md` §4 and §7; this
+  the `usage_client` library. Those are specified in `rate_limiting.md` §2.2 and §2.6; this
   doc only references them.
 - Changing actor behavior, the `process_documents` pipeline, or the gp3 contract.
 - The WS-4 `classify_users` pass. Today it runs after the task loop, aggregated per
@@ -61,7 +62,7 @@ recent tags tables (`stance_entries.aliases`). The older `json` columns
 orgs ─┬─< crawl_tasks >─ crawl_actor_classes          user_searches
       │        │  ├──1:1── crawl_schedules                   │
       │        │  └──<── crawl_task_searches >───────────────┘
-      │        └──< crawl_runs ──< crawl_run_calls ──(event_id)──> usage_events (rate_limiting §4)
+      │        └──< crawl_runs ──< crawl_run_calls ──(event_id)──> usage_events (rate_limiting §2.2)
       └─< crawl_comment_requests ──< crawl_comment_request_posts ──> crawl_runs (kind='comments')
 ```
 
@@ -69,7 +70,7 @@ orgs ─┬─< crawl_tasks >─ crawl_actor_classes          user_searches
 
 One row per key in the actor registry (`src/actors/__init__.py:16-25`). It holds the
 capability flags used by validation, scheduling and estimation. Prices are **not**
-stored here; they belong to `usage_client.prices` (`rate_limiting.md` §7).
+stored here; they belong to `usage_client.prices` (`rate_limiting.md` §2.4, §2.6).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -188,7 +189,7 @@ scrapes and video downloads.
 | `kind` | `text NOT NULL` CHECK `crawl`/`comments` | |
 | `task_id` | FK `crawl_tasks NULL` | set when `kind='crawl'` |
 | `comment_request_id` | FK `crawl_comment_requests NULL` | set when `kind='comments'`. A CHECK ties each kind to its FK |
-| `org_id` | `integer NOT NULL` FK `orgs` | attribution (`rate_limiting.md` §4.1) |
+| `org_id` | `integer NOT NULL` FK `orgs` | attribution (`rate_limiting.md` §2.3) |
 | `query_id` | FK `user_searches NULL ON DELETE SET NULL` | → `usage_events.search_id` |
 | `trigger` | `text NOT NULL` CHECK `api`/`schedule`/`cli` | |
 | `requested_by` | FK `users NULL` | |
@@ -198,7 +199,7 @@ scrapes and video downloads.
 | `max_items` | `integer NOT NULL` | effective cap after admission (≤ task `max_results`) |
 | `estimate_usd_low`, `estimate_usd_high` | `numeric(12,6)` | §7 |
 | `admitted_usd` | `numeric(12,6) NULL` | `Admission.allowed_usd` |
-| `block_id` | `bigint NULL` | `usage_blocks.block_id` when status is `blocked` |
+| `block_id` | `bigint NULL` | `usage_blocks.block_id` when status is `blocked`. Not filled yet by the backend or the worker (usage_client doesn't return the block id; known gap, `rate_limiting.md` §3.5) |
 | `dry_run` | `boolean NOT NULL DEFAULT false` | |
 | `trace_id` | `text NOT NULL` | `dev/trace.sh` |
 | `requested_at`, `queued_at`, `started_at`, `heartbeat_at`, `finished_at` | `timestamptz` | |
@@ -241,7 +242,7 @@ Indexes:
 Today `ApifyActor.run_actor()` throws away the run object (`actor.py:79-85`). The
 utility actors (`FacebookProfileActor`, `FacebookCommentsActor`, …) call
 `ApifyClient` directly. Capturing every call is the `usage_client.apify.run()` wrapper
-(`rate_limiting.md` §7): the worker's `RecordingApifyClient` routes every
+(`rate_limiting.md` §2.6–§2.7): the worker's `RecordingApifyClient` routes every
 `actor(id).call()` through it and stores the returned `usage_event_id` (§6.1.1).
 
 ### 2.7 `crawl_comment_requests` + `crawl_comment_request_posts` (comments-on-demand)
@@ -377,7 +378,7 @@ lift the cap (`resultsPerPage`, `maxItems`).
 
 `draft → active ⇄ paused → retired`
 
-- `draft`: proposed by a customer or agent ("read and propose", `rate_limiting.md` §3;
+- `draft`: proposed by a customer or agent ("read and propose", `rate_limiting.md` §0;
   sprint §3 Line B "Propose" tools such as `plan_crawl`). Never runs. It becomes
   `active` when we approve it.
 - `paused`: the old `enabled=false`, an untracked linked search (§2.3), or automatic
@@ -421,7 +422,7 @@ still incurred and still metered.
 ```
 POST /crawl/runs/request {task_id, options}        (or the scheduler, §6.2)
   backend: RBAC → org check → resolve params/window → estimate (§7)
-         → usage_client.admission.admit(ctx, tool='apify', kind='crawl', est_usd=high)
+         → admit_api(tool='apify', kind='crawl', est_usd=high)   (backend.helpers.usage → usage_client admit; partial allowed → admitted_usd)
          → INSERT crawl_runs(status='requested'→'queued' | 'blocked')
          → POST ENQUEUER_URL {"queue": CRAWL_RUNS_QUEUE, "message": {...}}   (pattern: event_report_helpers.py:198-240)
 rabbit_enqueuer → queue crawl_runs
@@ -452,9 +453,9 @@ Message shape (`trace_id` goes at the top level, per the workspace `CLAUDE.md`
 
 Worker rules:
 - No `org_id` → ack, error log, `usage_blocks(reason=missing_org,
-  path=worker:apify-client)` (`rate_limiting.md` §4.1).
+  path=worker:apify-client)` (`rate_limiting.md` §2.3).
 - If the cost write fails, the worker spools it and replays later. It never fails the
-  run because of it (`rate_limiting.md` §6 rules).
+  run because of it (`rate_limiting.md` §2.5: workers record with spool).
 - The DB row is the source of truth. `params` in the message is a convenience copy;
   the worker re-reads the row when they differ.
 
@@ -565,7 +566,7 @@ nudged down while `overlap_rate > target_overlap_rate`. The first run is a probe
 
 ## 7. Estimates and caps (hooks only)
 
-The price table and `admit()` belong to `usage_client` (`rate_limiting.md` §7). This
+The price table and `admit()` belong to `usage_client` (`rate_limiting.md` §2.4, §2.6). This
 design supplies the inputs and stores the outputs.
 
 ### 7.1 Crawl estimate (a range, never a point; agent_framework §5.1)
@@ -607,8 +608,8 @@ default is $0.02/post (`select_posts_for_comments.py:62-64`). The measured figur
 |---|---|---|
 | Per run | `max_items` → Apify `maxItems` / `resultsLimit`. Optional Apify run charge limit (verify the actor/client supports it) | agent_framework §5.1 |
 | Per task | `crawl_tasks.max_cost_usd_per_run`; `max_results` as hard ceiling | this doc |
-| Per org / day | `usage_limits` default `apify` $15/day; `maxItems` capped to remaining budget | `rate_limiting.md` §5, §6, P2 |
-| Per request | $2 / 2,000 docs rule applies to API-triggered runs | `rate_limiting.md` §5 (decided 2026-10-05) |
+| Per org / day | `usage_limits` default `apify` $15/day; `maxItems` capped to remaining budget | `rate_limiting.md` §2.4, §2.5, §2.7 |
+| Per request | $2 / 2,000 docs rule applies to API-triggered runs | `rate_limiting.md` §2.4 (decided 2026-10-05) |
 | Scheduler | auto-pause after `consecutive_failures`; one live run per task (§2.5 unique index) | this doc |
 
 ---
@@ -646,19 +647,21 @@ pattern of the tags tables. The worker's DB role is Q5.
 ### 9.1 Theme → org mapping
 
 Sources: `org.id` + `theme` in `business_agent/customers/<slug>/customer.yaml`, the org
-table in `rate_limiting.md` §5, and the keep-list in sprint §8 item 7. Counts are xlsx
+table of the 2026-10-05 `rate_limiting.md` draft ("rl draft" below; the spec has since been
+restructured and no longer carries it), and the keep-list in sprint §8 item 7. The decided
+map now lives in `src/scripts/import_tasks_xlsx.py` (`KEEP_THEMES` / `RETIRED_THEMES`). Counts are xlsx
 rows (enabled/total) on 2026-10-05.
 
 | theme | rows | org_id | source / note |
 |---|---|---|---|
-| `totalenergies` | 52/67 | 62 | `rate_limiting.md` §5 "62 TotalEnergies" (no `customers/` folder) |
+| `totalenergies` | 52/67 | 62 | rl draft "62 TotalEnergies" (no `customers/` folder) |
 | `totalenergies_guadalupe` | 5/5 | 62? | Q1 |
 | `pinal_amoles` | 17/18 | 106 | `customers/pinal_amoles/customer.yaml` |
 | `zitacuaro` | 13/13 | 102 | `customers/zitacuaro/customer.yaml` |
 | `sjdr` | 0/18 | 101 | `customers/sjdr/customer.yaml`. Dropped per sprint §8.7 → `retired` |
-| `morelia_descifra` | 0/20 | 105 | `rate_limiting.md` §5. Dropped per sprint §8.7 → `retired` |
+| `morelia_descifra` | 0/20 | 105 | rl draft. Dropped per sprint §8.7 → `retired` |
 | `orizaba` | 0/15 | 47 today → new Orizaba org | `customers/orizaba/customer.yaml` (reuses rows 9–16, 18, 80, 86). Sprint §2.3/§8.7 → import once the new org exists (Q1) |
-| `queretaro` | 0/8 | 93 | `rate_limiting.md` §5 |
+| `queretaro` | 0/8 | 93 | rl draft |
 | `mc`, `zona_fest`, `top_news`, `chepe_guerrero`, `felifer`, `efren_cuevas` | 0/21 | — | no org on record. Leave in the frozen xlsx (Q1) |
 
 **Cross-check against `ids.json` `crawl_task_ids`**:
@@ -673,7 +676,7 @@ So the importer maps by `theme` and uses `ids.json` only to warn, never as the k
 ### 9.2 Steps
 
 1. **DDL locally.** Apply the migration to a throwaway DB (`dev/testdb.sh
-   proto06_test_apify_client`, `rate_limiting.md` §10) and to local userdb `:5334`
+   proto06_test_apify_client`, `rate_limiting.md` §5) and to local userdb `:5334`
    (`dev/docs/db/userdb_runbook.md`). Seed `crawl_actor_classes` from the registry.
    Applying it to stg proto06 needs Oscar's go.
 2. **Import script** `apify_client/src/scripts/import_tasks_xlsx.py` — **written
@@ -790,5 +793,5 @@ So the importer maps by `theme` and uses `ids.json` only to warn, never as the k
 > `tool='apify'`, `kind` = `crawl`|`comments`|`profiles`, `unit='items'`, `event_id =
 > 'apify-client:crawl-run:<run_id>:<org_id>:<kind>:<apify_run_id>'`), linked from
 > `crawl_run_calls.usage_event_id`. Admission (`usage_limits`) happens
-> before the run row is queued. See the rate-limiting spec
-> (`business_agent/docs/plans/rate_limiting.md` §4–§7).
+> before the run row is queued (backend) and again on every Apify call (worker). See the rate-limiting spec
+> (`business_agent/docs/plans/rate_limiting.md` §2).
