@@ -25,6 +25,31 @@ def _get_apify_token() -> str:
         )
     return token
 
+class UnmeteredApifyClient:
+    """Stand-in client for an actor built without one: every Apify call is refused.
+
+    Paid Apify calls go through ``usage_client.apify.run`` (rate_limiting.md §2.1: no org,
+    no spend). The crawl worker and ``run_searches`` pass a ``RecordingApifyClient``; scripts
+    build one with ``src.helpers.metering.metered_client``. An actor constructed bare (tests,
+    offline parsing) can map and filter data but can't buy anything.
+    """
+
+    def _refuse(self, what: str):
+        from usage_client import MissingOrg
+
+        raise MissingOrg(f"Apify {what} on an actor without a metered client: pass "
+                         "src.helpers.metering.metered_client(...) (no org, no spend)")
+
+    def actor(self, actor_id: str):
+        self._refuse(f"actor {actor_id!r}")
+
+    def dataset(self, dataset_id: str):
+        self._refuse(f"dataset {dataset_id!r}")
+
+    def run(self, run_id: str):
+        self._refuse(f"run {run_id!r}")
+
+
 # TODO: Replace file-based filter cache with Redis for multi-process/distributed support
 FILTER_CACHE_PATH = os.path.join("cache", "filter_cache.json")
 
@@ -75,7 +100,8 @@ class ApifyActor:
     actor_id: str = ""  # Apify actor ID, set by subclass
 
     def __init__(self, client: Optional[ApifyClient] = None):
-        self.client = client or ApifyClient(_get_apify_token())
+        # No client → no Apify spend (UnmeteredApifyClient refuses every call).
+        self.client = client if client is not None else UnmeteredApifyClient()
         self.search_params_keywords: List[str] = []  # Should be set by the actor subclass when the scraping is keyword or hashtag-based
         self._filter_cache: Dict[str, bool] = self._load_filter_cache()
         self.filtered_documents: List[Dict[str, Any]] = []
