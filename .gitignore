@@ -9,3 +9,7 @@ cache
 
 __pycache__/
 ~$tasks.xlsx
+
+# Local-stack routing overrides (dev/stack.sh), layered over the env file; never committed
+.env.stack
+.env.local
