@@ -113,15 +113,6 @@ class FacebookPagePostsActor(ApifyActor):
             run_input["onlyPostsNewerThan"] = newer_than
 
         raw_results = self.run_actor(run_input)
-        import pickle
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        task_id = kwargs.get("task_id")
-        with open(f'/Users/oscarcuellar/Downloads/raw_fbpage_results_{task_id}_{ts}.pkl', 'wb') as f:
-            pickle.dump(raw_results, f)
-
-        
-        #with open('/Users/oscarcuellar/Downloads/raw_fbpage_results_5_20260406_230451.pkl', 'rb') as f:
-        #    raw_results = pickle.load(f)
 
         posts = [FacebookPost.from_facebook(item) for item in raw_results]
 
