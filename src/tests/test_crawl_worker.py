@@ -205,10 +205,11 @@ class FakeDB:
     def finish_run(self, run_id, status, error, output_path, counters, stats):
         run = self.runs[run_id]
         if run["status"] != "running":
-            return
+            return False
         run.update(status=status, error=error, output_path=output_path, **counters)
         run["stats"] = {**run.get("stats", {}), **json.loads(json.dumps(stats, default=str))}
         self.finished.append(run_id)
+        return True
 
     def update_schedule_after_run(self, task_id, run_id, success):
         self.schedule_updates.append((task_id, run_id, success))
@@ -534,6 +535,23 @@ class TestRunExecution:
         with _no_es():
             handle_message(json.dumps(_message()), deps)
         assert db.schedule_updates == [(159, 1234, True)]
+
+    def test_reaped_run_skips_schedule_bookkeeping(self, world):
+        """The scheduler's reaper failed the run mid-flight (stale heartbeat): the late
+        finish is not written and the schedule is left to the scheduler."""
+        db, apify, deps, _ = world
+        db.runs[1234]["trigger"] = "schedule"
+        real_actor = apify.actor
+
+        def reaping_actor(actor_id):
+            db.runs[1234]["status"] = "failed"   # reaper: running -> failed
+            return real_actor(actor_id)
+
+        apify.actor = reaping_actor
+        with _no_es():
+            handle_message(json.dumps(_message()), deps)
+        assert db.runs[1234]["status"] == "failed" and 1234 not in db.finished
+        assert db.schedule_updates == []
 
     def test_heartbeat_runs_during_execution(self, world):
         db, apify, deps, _ = world

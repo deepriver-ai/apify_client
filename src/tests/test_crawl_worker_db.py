@@ -130,7 +130,8 @@ def test_lifecycle_sql_within_grants(seeded, tmp_path):
 
     counters = {"items_paid": 4, "items_already_seen": 1, "items_new": 3, "cost_usd": 0.0123,
                 "items_dropped_llm": 0}
-    db.finish_run(run_id, "succeeded", None, None, counters, {"funnel": {"docs_in": 4}})
+    assert db.finish_run(run_id, "succeeded", None, None, counters, {"funnel": {"docs_in": 4}}) is True
+    assert db.finish_run(run_id, "failed", "late", None, counters, {}) is False   # no longer running
     assert db.update_schedule_after_run(seeded["task"], run_id, True) == 1
 
     r = _admin("SELECT * FROM crawl_runs WHERE run_id = %s", (run_id,))[0]

@@ -479,11 +479,15 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
         "publish_failures": publish_failures,
         "cost_unknown_calls": sum(1 for c in recorder.calls if c.cost_usd is None),
     })
-    db.finish_run(run_id, status, error, output_path, counters, stats)
+    written = db.finish_run(run_id, status, error, output_path, counters, stats)
     logger.info("run %s finished: status=%s items_paid=%s items_new=%s cost_usd=%s error=%s",
                 run_id, status, counters.get("items_paid"), counters.get("items_new"), counters.get("cost_usd"), error)
 
-    if run.get("trigger") == "schedule" and run.get("task_id") and status != "blocked":
+    if written is False:
+        # Reaped while we worked (stale heartbeat): the scheduler already failed it and
+        # settles the schedule from that row; our late outcome must not touch it.
+        logger.warning("run %s: finished after being reaped — schedule bookkeeping skipped", run_id)
+    elif run.get("trigger") == "schedule" and run.get("task_id") and status != "blocked":
         try:
             db.update_schedule_after_run(run["task_id"], run_id, status == "succeeded")
         except Exception as exc:
