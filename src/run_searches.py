@@ -20,7 +20,6 @@ import argparse
 import json
 import logging
 import os
-import uuid
 from datetime import datetime
 from typing import Any, Optional
 
@@ -28,7 +27,8 @@ from pika.exceptions import AMQPError
 
 from src.actors import get_actor
 from src.models.crawl_task import CrawlTask, load_tasks
-from src.worker.recording import SERVICE, CallRecorder, RecordingApifyClient, UsageMeter, instrument_actor
+from src.helpers import metering
+from src.worker.recording import UsageMeter, instrument_actor
 
 logger = logging.getLogger(__name__)
 
@@ -51,65 +51,28 @@ CURRENT_THEME = os.getenv("CURRENT_THEME", CURRENT_THEME)
 # own `override_filters` value. Equivalent to forcing override_filters=True everywhere.
 OVERRIDE_FILTERED_CACHE = False
 
-DEFAULT_USAGE_SPOOL_DIR = os.path.join("cache", "usage_spool")
-
-
-def theme_org(theme: Optional[str]) -> Optional[int]:
-    """The org a theme's tasks spend for (the importer's decided map), or None."""
-    from src.scripts.import_tasks_xlsx import KEEP_THEMES, RETIRED_THEMES
-
-    return KEEP_THEMES.get(theme) or RETIRED_THEMES.get(theme)
+DEFAULT_USAGE_SPOOL_DIR = metering.DEFAULT_USAGE_SPOOL_DIR
+theme_org = metering.theme_org
+configure_usage_ledger = metering.configure_usage_ledger
 
 
 def task_meter(task: CrawlTask, *, session: str, platform: bool = False, ledger: Any = None) -> UsageMeter:
     """The ``UsageMeter`` a hand-run task spends through. Raises ``usage_client.MissingOrg``
     (after a best-effort ``usage_blocks`` row) when the task has no org and ``platform``
     is off; ``LedgerUnavailable`` if the platform org can't be resolved."""
-    from usage_client import MissingOrg
-
-    event_key = f"run-searches:{session}:{task.task_id}"
-    org_id = theme_org(task.theme)
-    if org_id is not None:
-        return UsageMeter(org_id=org_id, event_key=event_key, ledger=ledger)
-    if platform:
-        from usage_client.platform import platform_org_id
-
-        return UsageMeter(org_id=platform_org_id(ledger), event_key=event_key, scope="global", ledger=ledger)
-    try:
-        if ledger is None:
-            from usage_client.ledger import get_ledger
-
-            ledger = get_ledger()
-        ledger.block(path=f"worker:{SERVICE}", tool="apify", kind="crawl", reason="missing_org")
-    except Exception as exc:
-        logger.error("could not write usage_blocks(missing_org): %s", exc)
-    raise MissingOrg(f"task {task.task_id} (theme {task.theme!r}) has no org: refused, nothing bought "
-                     f"(--platform runs it under the platform org)")
+    return metering.meter(event_key=f"run-searches:{session}:{task.task_id}", theme=task.theme,
+                          platform=platform, ledger=ledger, kind="crawl",
+                          what=f"task {task.task_id}")
 
 
 def build_actor(task: CrawlTask, *, session: str, platform: bool = False, ledger: Any = None,
                 apify_client: Any = None):
     """The task's actor on a client that meters every Apify call through usage_client."""
-    meter = task_meter(task, session=session, platform=platform, ledger=ledger)
-    if apify_client is None:
-        from apify_client import ApifyClient
-
-        from src.actors.actor import _get_apify_token
-
-        apify_client = ApifyClient(_get_apify_token())
-    recorder = CallRecorder()
-    actor = get_actor(task.actor_class, client=RecordingApifyClient(apify_client, recorder, meter))
+    usage_meter = task_meter(task, session=session, platform=platform, ledger=ledger)
+    client, recorder = metering.metered_client(usage_meter, apify_client=apify_client)
+    actor = get_actor(task.actor_class, client=client)
     instrument_actor(actor, recorder)  # purpose → usage kind (crawl / comments / profiles)
     return actor
-
-
-def configure_usage_ledger():
-    from usage_client import ledger as usage_ledger
-
-    dsn = os.getenv("USAGE_DB_URI") or os.getenv("DATABASE_URI")
-    if not dsn:
-        logger.error("USAGE_DB_URI (or DATABASE_URI) is not set: admission fails closed, no task will run")
-    return usage_ledger.configure(dsn, spool_dir=os.getenv("USAGE_SPOOL_DIR") or DEFAULT_USAGE_SPOOL_DIR)
 
 
 if __name__ == "__main__":
@@ -127,7 +90,7 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     usage_ledger = configure_usage_ledger()
-    session = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    session = metering.new_session()
 
     tasks = load_tasks(xlsx_path)
     logger.info("Loaded %d enabled tasks from %s", len(tasks), xlsx_path)
