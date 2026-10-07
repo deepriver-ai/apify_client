@@ -30,6 +30,31 @@ def _load_cache(filename: str) -> List[Dict[str, Any]]:
         return json.load(f)
 
 
+@pytest.fixture(autouse=True)
+def _usage_client_apify_isolation(monkeypatch, tmp_path):
+    """usage_client's Apify settling waits on a fake clock; pricing never goes to the
+    network (the dummy token above would otherwise be sent to api.apify.com) and caches /
+    spools land in tmp_path."""
+    from usage_client import apify_cost, apify_pricing
+
+    clock = {"t": 0.0, "sleeps": []}
+
+    def sleep(s):
+        clock["sleeps"].append(s)
+        clock["t"] += s
+
+    monkeypatch.setattr(apify_cost, "_monotonic", lambda: clock["t"])
+    monkeypatch.setattr(apify_cost, "_sleep", sleep)
+    real_fetch = apify_pricing._fetch
+    monkeypatch.setattr(apify_pricing, "_fetch",
+                        lambda actor_id, client: real_fetch(actor_id, client) if client is not None else None)
+    monkeypatch.setenv("USAGE_APIFY_PRICING_CACHE", str(tmp_path / "apify_pricing.json"))
+    monkeypatch.setenv("USAGE_SPOOL_DIR", str(tmp_path / "usage_spool"))
+    apify_pricing.clear_memo()
+    yield clock
+    apify_pricing.clear_memo()
+
+
 @pytest.fixture
 def sample_google_news_results() -> List[Dict[str, Any]]:
     return _load_cache("google_news_sample.json")

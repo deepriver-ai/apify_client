@@ -50,6 +50,17 @@ class FakeApify:
         self.fail_on = fail_on
         self.calls: List[dict] = []
         self.datasets: Dict[str, List[dict]] = {}
+        self.runs: Dict[str, dict] = {}
+
+    def run(self, run_id):
+        """GET /v2/actor-runs/{id}: the finished run, charges settled."""
+        fake = self
+
+        class _R:
+            def get(self):
+                return copy.deepcopy(fake.runs.get(run_id))
+
+        return _R()
 
     def actor(self, actor_id):
         fake = self
@@ -64,7 +75,7 @@ class FakeApify:
                     items = items[: kwargs["max_items"]]
                 fake.calls.append({"actor_id": actor_id, "run_input": run_input, "kwargs": kwargs})
                 fake.datasets[f"ds-{n}"] = items
-                return {
+                run = {
                     "id": f"apifyrun-{actor_id.replace('/', '_')}-{n}-{uuid.uuid4().hex[:8]}",
                     "status": "SUCCEEDED",
                     "defaultDatasetId": f"ds-{n}",
@@ -73,6 +84,8 @@ class FakeApify:
                     "startedAt": "2026-10-06T12:00:00.000Z",
                     "finishedAt": "2026-10-06T12:00:05.000Z",
                 }
+                fake.runs[run["id"]] = run
+                return dict(run)
 
         return _A()
 
@@ -655,21 +668,23 @@ class TestUsageMetering:
             handle_message(json.dumps(_message(max_items=20, max_cost_usd=0.20)), deps)
         assert db.runs[1234]["status"] == "succeeded", db.runs[1234].get("error")
         kw = apify.calls[0]["kwargs"]
-        # min(search budget 20, floor(0.06 / 0.004) = 15) items, charge capped to the admitted 15 x 0.004
-        assert kw["max_items"] == 15
-        assert float(kw["max_total_charge_usd"]) == pytest.approx(0.06)
+        # apify/facebook-posts-scraper's real price: $0.001 / start + $0.005 / post (incl. the
+        # date-filter add-on) → min(search budget 20, floor((0.06 - 0.001) / 0.005) = 11) items,
+        # charge capped to the admitted 11 x 0.005 + the start charge
+        assert kw["max_items"] == 11
+        assert float(kw["max_total_charge_usd"]) == pytest.approx(0.056)
         (ev,) = deps.usage_ledger.recorded()
-        assert ev.raw["max_items"] == 15 and ev.raw["max_total_charge_usd"] == pytest.approx(0.06)
+        assert ev.raw["max_items"] == 11 and ev.raw["max_total_charge_usd"] == pytest.approx(0.056)
 
     def test_org_budget_caps_the_call(self, world):
-        """Partial admission: the org has $0.02 left today → 5 crawl items."""
+        """Partial admission: the org has $0.02 left today → 4 posts at $0.005 (+ the $0.001 start)."""
         db, apify, deps, _ = world
         deps.usage_ledger.spent(106, 14.98)
         with _no_es():
             handle_message(json.dumps(_message()), deps)
         assert db.runs[1234]["status"] == "succeeded", db.runs[1234].get("error")
-        assert apify.calls[0]["kwargs"]["max_items"] == 5
-        assert float(apify.calls[0]["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.02)
+        assert apify.calls[0]["kwargs"]["max_items"] == 4
+        assert float(apify.calls[0]["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.021)
 
     def test_over_limit_before_any_call_blocks_the_run(self, world):
         db, apify, deps, _ = world
@@ -768,8 +783,8 @@ class TestUsageMetering:
         assert db.runs[77]["status"] == "succeeded", db.runs[77].get("error")
         (ev,) = deps.usage_ledger.recorded()
         assert ev.kind == "comments" and ev.event_id.startswith("apify-client:crawl-run:77:106:comments:")
-        # message max_cost_usd 0.20 → floor(0.20 / 0.002) = 100 comment items
-        assert apify.calls[0]["kwargs"]["max_items"] == 100
+        # message max_cost_usd 0.20 → floor((0.20 - $0.001 start) / $0.002) = 99 comment items
+        assert apify.calls[0]["kwargs"]["max_items"] == 99
 
     def test_refused_run_never_asks_again(self):
         """After a refusal the client refuses locally: one block row, no Apify call."""

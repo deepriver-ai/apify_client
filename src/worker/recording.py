@@ -6,9 +6,14 @@ Design: docs/db/crawl_tasks.md §2.6 (``crawl_run_calls``), §6.1, §7.3, §7.4.
 through ``client.actor(id).call(run_input=...)``. The worker hands each actor a
 ``RecordingApifyClient`` instead of the raw ``ApifyClient``, so no actor code changes:
 
-- each call's run object (``id``, ``status``, ``usageTotalUsd``, ``usage``) and dataset
-  item count are passed to ``CallRecorder.on_call`` the moment the call returns, so the
-  cost is persisted before anything else can fail (§5.2 ``partial``);
+- each call's run object (``id``, ``status``), dataset item count and cost are passed to
+  ``CallRecorder.on_call`` as soon as ``usage_client.apify.run`` has recorded it, so the
+  cost is persisted before anything else can fail (§5.2 ``partial``). The cost is
+  usage_client's **settled** reading (``usage_cost_usd`` / ``usage_estimated``,
+  ``usage_client.apify_cost.settle_run``) — the same figure as the ``usage_events`` row, not
+  ``usageTotalUsd`` as the call returned it (2026-10-07: that held only the actor-start
+  charge of pay-per-event actors). An unsettled run is stored ``estimated=true`` with our
+  own computed figure; ``src/scripts/reconcile_costs.py`` corrects it later;
 - calls are tagged with a ``purpose`` (search / profiles / comments / video / other) from
   the pipeline stage they run in (``instrument_actor``);
 - **every call goes through ``usage_client.apify.run``** (rate_limiting.md §2.6-§2.7,
@@ -35,6 +40,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from usage_client import AdmissionRefused, UsageContext
 from usage_client.apify import as_dict
+from usage_client.apify_cost import charged_counts
 
 logger = logging.getLogger(__name__)
 
@@ -286,12 +292,12 @@ class RecordingApifyClient:
         if max_charge is not None:
             from usage_client import prices
 
-            unit = prices.estimate("apify", kind_for(purpose), 1)
-            if float(max_charge) < unit:
-                # Less than one item's list price left: usage_client would ask for 0 items.
+            price = prices.apify_unit(actor_id, kind_for(purpose), client=self._client)
+            if float(max_charge) < price.start_usd + price.item_usd:
+                # Less than the start charge + one result left: usage_client would ask for 0 items.
                 raise CostCapExceeded(
-                    f"run cost budget left ({float(max_charge):.6f} USD) is below one {kind_for(purpose)} item "
-                    f"({unit} USD); skipping {purpose} call to {actor_id}"
+                    f"run cost budget left ({float(max_charge):.6f} USD) is below one {kind_for(purpose)} run of "
+                    f"{actor_id} (start {price.start_usd} + 1 item {price.item_usd} USD); skipping {purpose} call"
                 )
 
         started = _now()
@@ -309,42 +315,29 @@ class RecordingApifyClient:
             logger.warning("Apify call to %s returned no run object (purpose=%s)", actor_id, purpose)
             return run
 
-        run = self._ensure_usage(run)
-        items = self._dataset_item_count(run)
+        items = run.get("usage_items")
+        if items is None:
+            items = self._dataset_item_count(run)
+        cost = _to_float(run["usage_cost_usd"]) if "usage_cost_usd" in run else _to_float(run.get("usageTotalUsd"))
         record = CallRecord(
             purpose=purpose if purpose in PURPOSES else "other",
             apify_actor_id=actor_id,
             apify_run_id=str(run.get("id")),
             apify_status=run.get("status"),
             items=items,
-            cost_usd=_to_float(run.get("usageTotalUsd")),
-            estimated=False,
-            usage=run.get("usage"),
+            cost_usd=cost,
+            estimated=bool(run.get("usage_estimated", cost is None)),
+            usage=usage_of(run),
             usage_event_id=run.get("usage_event_id"),
             started_at=_parse_ts(run.get("startedAt")) or started,
             finished_at=_parse_ts(run.get("finishedAt")) or finished,
         )
         rec.record(record)
         logger.info(
-            "apify call recorded: purpose=%s actor=%s run=%s status=%s items=%s cost_usd=%s",
+            "apify call recorded: purpose=%s actor=%s run=%s status=%s items=%s cost_usd=%s estimated=%s",
             record.purpose, actor_id, record.apify_run_id, record.apify_status, items, record.cost_usd,
+            record.estimated,
         )
-        return run
-
-    def _ensure_usage(self, run: Dict[str, Any]) -> Dict[str, Any]:
-        """``usageTotalUsd`` can lag the finished run; re-read the run object once."""
-        if run.get("usageTotalUsd") is not None or not run.get("id"):
-            return run
-        try:
-            fresh = as_dict(self._client.run(run["id"]).get())  # apify_client 3.x: a model
-            if fresh:
-                merged = dict(run)
-                for key in ("usageTotalUsd", "usage", "status", "finishedAt"):
-                    if fresh.get(key) is not None:
-                        merged[key] = fresh[key]
-                return merged
-        except Exception as exc:
-            logger.warning("could not re-read apify run %s for usage: %s", run.get("id"), exc)
         return run
 
     def _dataset_item_count(self, run: Dict[str, Any]) -> Optional[int]:
@@ -358,6 +351,21 @@ class RecordingApifyClient:
         except Exception as exc:
             logger.warning("could not read item count of dataset %s: %s", dataset_id, exc)
             return None
+
+
+def usage_of(run: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``crawl_run_calls.usage``: Apify's ``usage`` object when the run has one (platform-usage
+    actors), plus the pay-per-event charges (``chargedEventCounts``,
+    ``accountedChargedEventCounts``, ``eventUsage``) and whether the cost was settled."""
+    out = {k: run.get(k) for k in ("usage", "chargedEventCounts", "accountedChargedEventCounts", "eventUsage")
+           if run.get(k)}
+    if not out and not charged_counts(run) and "usage_settled" not in run:
+        return None
+    if "usage_settled" in run:
+        out["settled"] = bool(run.get("usage_settled"))
+    if run.get("usage_computed_usd") is not None:
+        out["computed_usd"] = run.get("usage_computed_usd")
+    return out or None
 
 
 def _to_float(value: Any) -> Optional[float]:

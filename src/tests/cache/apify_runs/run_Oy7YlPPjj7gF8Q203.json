@@ -1,0 +1,64 @@
+{
+ "accountedChargedEventCounts": {
+  "apify-actor-start": 1,
+  "apify-default-dataset-item": 29
+ },
+ "actId": "F60Kx7YJNOmKmqQm3",
+ "chargedEventCounts": {
+  "apify-actor-start": 1,
+  "apify-default-dataset-item": 29
+ },
+ "defaultDatasetId": "kGbbcychtnecvFAfm",
+ "eventUsage": {
+  "apify-actor-start": {
+   "eventTitle": "Actor Start",
+   "eventTotalUsd": 5e-05
+  },
+  "apify-default-dataset-item": {
+   "eventTitle": "result",
+   "eventTotalUsd": 0.07511
+  }
+ },
+ "finishedAt": "2026-10-07T06:03:26.564Z",
+ "id": "Oy7YlPPjj7gF8Q203",
+ "options": {
+  "build": "latest",
+  "diskMbytes": 512,
+  "isMaxTotalChargeUsdSetByUser": true,
+  "maxItems": 30,
+  "maxTotalChargeUsd": 0.12,
+  "memoryMbytes": 256,
+  "timeoutSecs": 3600
+ },
+ "platformUsageBillingModel": "DEVELOPER",
+ "pricingInfo": {
+  "apifyMarginPercentage": 0.2,
+  "createdAt": "2026-03-21T01:05:58.910Z",
+  "isPriceChangeNotificationSuppressed": false,
+  "minimalMaxTotalChargeUsd": null,
+  "pricingModel": "PAY_PER_EVENT",
+  "pricingPerEvent": {
+   "actorChargeEvents": {
+    "apify-actor-start": {
+     "eventDescription": "Charged when the Actor starts running. Number of events charged depends on Actor memory (one event per GB, minimum one event).",
+     "eventPriceUsd": 5e-05,
+     "eventTitle": "Actor Start",
+     "isOneTimeEvent": true
+    },
+    "apify-default-dataset-item": {
+     "eventDescription": "Single result in the default dataset.",
+     "eventPriceUsd": 0.00259,
+     "eventTitle": "result",
+     "isPrimaryEvent": true
+    }
+   }
+  },
+  "startedAt": "2026-03-21T01:05:58.257Z"
+ },
+ "startedAt": "2026-10-07T06:02:48.529Z",
+ "stats": {
+  "computeUnits": 0.002630625
+ },
+ "status": "SUCCEEDED",
+ "usageTotalUsd": 0.07515999999999999
+}

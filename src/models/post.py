@@ -100,6 +100,12 @@ class Post(Document):
         if not news:
             logger.warning("Could not fetch/parse attached URL: %s", url)
             return
+        if not (news.data.get("body") or "").strip():
+            # Fetched but nothing extracted (dead host, e.g. a truncated "http://3.er/"):
+            # publishing it would fail schema validation ("Missing required field: body").
+            logger.warning("Dropping attached URL %s of post %s: parsed with an empty body", url,
+                           self.data.get("url"))
+            return
 
         self.attached_news = news
 
