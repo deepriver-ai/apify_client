@@ -22,7 +22,7 @@ Use Python 3. Dependencies are listed in `requirements.txt`.
 
 ```bash
 pip install -r requirements.txt
-pip install -e ../usage_client            # required: every Apify call is metered through it (images: the Dockerfile installs `usage-client[apify]` at `USAGE_CLIENT_VERSION`, see CLAUDE.md §Usage metering; the crawl worker deployment runs `python -m src.run_crawl_worker`, the image ENTRYPOINT is `run_searches`)
+pip install -e ../usage_client            # required: every Apify call is metered through it (images: the Dockerfile installs `usage-client[apify]` at `USAGE_CLIENT_VERSION` and `elastic_client` at `ELASTIC_CLIENT_VERSION`, see CLAUDE.md §Usage metering; the image ENTRYPOINT is the crawl worker, hand runs override it with `--entrypoint`)
 source setup_local.sh
 python -m pytest src/tests/ -v
 python -m src.run_searches
