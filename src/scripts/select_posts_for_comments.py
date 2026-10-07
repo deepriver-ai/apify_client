@@ -347,6 +347,7 @@ def build_task_file(posts: List[Post], args, stats: Dict[str, Any]) -> Dict[str,
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "producer_version": PRODUCER_VERSION,
+        "org_id": getattr(args, "org", None),   # who buys the comments (run_comment_tasks)
         "scope": {"pages": args.pages, "phrases": args.phrases, "networks": args.networks,
                   "days": args.days, "context": args.context,
                   "official_pages": args.official_pages},
@@ -430,6 +431,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-llm", action="store_true", help="lexical theme prior instead of the LLM class")
     ap.add_argument("--override", action="store_true", help="bypass the LLM cache")
     ap.add_argument("--out", default=None, help="task file path (default cache/comment_tasks/…)")
+    ap.add_argument("--org", type=int, default=None,
+                    help="org the comment purchase is for: stamped into the task file as org_id")
     return ap
 
 

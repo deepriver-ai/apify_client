@@ -13,8 +13,19 @@ comments into the existing ES document by exact URL) — or, with
     python -m src.scripts.run_comment_tasks cache/comment_tasks/morelia.json --apply
     python -m src.scripts.run_comment_tasks ... --apply --tiers deep --no-publish
 
-Environment: APIFY_TOKEN (actor), RABBIT_* (publish; check the vhost — a local
-run must point at ``document_processing_dev``).
+Who pays (rate_limiting.md §2.1, §2.3): every Apify call goes through
+``usage_client.apify.run`` (kind ``comments``; admitted against the org's limits, capped,
+one ``usage_events`` row per Apify run, event key ``comment-tasks:<session>:<tier>``). The
+org is ``--org``, else the task file's ``org_id``, else ``--theme``'s org; ``--platform``
+runs it as internal work under the platform org. No org → refused before any Apify call.
+Caps per tier run: ``max_items`` = posts × depth; ``--max-cost-usd`` caps the whole
+invocation (``max_total_charge_usd``, shared across tiers).
+
+    python -m src.scripts.run_comment_tasks cache/comment_tasks/morelia.json --apply --org 105
+
+Environment: APIFI_API_TOKEN (actor), USAGE_DB_URI (or DATABASE_URI; the usage ledger —
+without it admission fails closed and nothing is bought), RABBIT_* (publish; check the
+vhost — a local run must point at ``document_processing_dev``).
 """
 
 from __future__ import annotations
@@ -24,7 +35,7 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +61,30 @@ def plan_runs(task: Dict[str, Any], tiers: List[str]) -> List[Dict[str, Any]]:
     return runs
 
 
-def execute(run: Dict[str, Any], task_id: str, publish: bool) -> int:
-    from src.actors import get_actor
-    from src.helpers.serialization import publish_document
+def tier_meter(task: Dict[str, Any], tier: str, *, session: str, org_id: Optional[int] = None,
+               theme: Optional[str] = None, platform: bool = False, ledger: Any = None):
+    """The ``UsageMeter`` a tier's run spends through (``MissingOrg`` when nobody pays)."""
+    from src.helpers import metering
 
-    actor = get_actor("facebook_post_comments")
+    if org_id is None and task.get("org_id") is not None:
+        org_id = task["org_id"]
+    return metering.meter(event_key=f"comment-tasks:{session}:{tier}", org_id=org_id, theme=theme,
+                          platform=platform, ledger=ledger, kind="comments", what="comment task file")
+
+
+def execute(run: Dict[str, Any], task_id: str, publish: bool, *, usage_meter: Any,
+            cost_budget_usd: Optional[float] = None, apify_client: Any = None) -> Tuple[int, float]:
+    """Run one tier; returns ``(comments, cost_usd)``. Every Apify call is metered (kind comments)."""
+    from src.helpers import metering
+
+    actor, recorder = metering.metered_actor(
+        "facebook_post_comments", usage_meter, apify_client=apify_client, default_purpose="comments",
+        max_items_per_call=len(run["urls"]) * run["depth"], cost_budget_usd=cost_budget_usd)
     docs = actor.search(run["urls"], max_comments=run["depth"], task_id=task_id)
     total = sum(len(d.data.get("comments") or []) for d in docs)
     if publish:
+        from src.helpers.serialization import publish_document
+
         for doc in docs:
             publish_document(doc)
         logger.info("published %d comment-update docs (%d comments) tier=%s",
@@ -70,10 +97,12 @@ def execute(run: Dict[str, Any], task_id: str, publish: bool) -> int:
         with open(path, "w", encoding="utf-8") as f:
             json.dump([d.to_final_schema() for d in docs], f, ensure_ascii=False, indent=2, default=str)
         logger.info("saved %d docs (%d comments) to %s", len(docs), total, path)
-    return total
+    return total, recorder.cost_usd
 
 
 def main() -> None:
+    from src.helpers import metering
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("task_file")
@@ -81,6 +110,7 @@ def main() -> None:
     ap.add_argument("--apply", action="store_true", help="actually call Apify")
     ap.add_argument("--no-publish", action="store_true",
                     help="with --apply: save to cache/runs instead of publishing to RabbitMQ")
+    metering.add_usage_args(ap)
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from dotenv import load_dotenv
@@ -101,14 +131,25 @@ def main() -> None:
                  f"{os.getenv('RABBIT_VIRTUALHOST') or os.getenv('RABBIT_VIRTUAL_HOST') or '?'}"))
         return
 
+    usage_ledger = metering.configure_usage_ledger()
+    session = metering.new_session()
+    meters = {r["tier"]: tier_meter(task, r["tier"], session=session, org_id=args.org, theme=args.theme,
+                                    platform=args.platform, ledger=usage_ledger) for r in runs}
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    total = 0
+    total, spent = 0, 0.0
     for r in runs:
-        total += execute(r, task_id=f"comments_{stamp}_{r['tier']}", publish=not args.no_publish)
+        budget = None if args.max_cost_usd is None else max(args.max_cost_usd - spent, 0.0)
+        if budget is not None and budget <= 0:
+            print(f"--max-cost-usd {args.max_cost_usd} spent: skipping tier {r['tier']} and the rest")
+            break
+        n, cost = execute(r, task_id=f"comments_{stamp}_{r['tier']}", publish=not args.no_publish,
+                          usage_meter=meters[r["tier"]], cost_budget_usd=budget)
+        total, spent = total + n, spent + cost
     if not args.no_publish:
         from src.helpers.rabbitmq import close_client
         close_client()
-    print(f"done: {total} comments across {len(runs)} run(s)")
+    print(f"done: {total} comments across {len(runs)} run(s), ${spent:.4f} "
+          f"(org {meters[runs[0]['tier']].org_id})")
 
 
 if __name__ == "__main__":

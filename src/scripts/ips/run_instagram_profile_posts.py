@@ -3,6 +3,14 @@ Run InstagramProfilePostsActor with a sample task.
 
 Usage (from project root):
     ipython -i src/scripts/run_instagram_profile_posts.py
+
+Who pays (rate_limiting.md §2.1, §2.3): every Apify call goes through
+``usage_client.apify.run`` (admitted against the org's limits, capped, one
+``usage_events`` row per Apify run; event key ``ig-profile-posts:<session>:<task_id>``).
+Set ``org_id`` or ``theme`` below (or ``platform = True`` for internal work); with none the
+run is refused before any Apify call. Needs ``USAGE_DB_URI`` (or ``DATABASE_URI``).
+The Gemini post-analysis below (``ai_describe.analyse_post``) is NOT metered: it calls
+Google's API directly, outside usage_client.
 """
 from __future__ import annotations
 
@@ -15,14 +23,20 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-from src.actors.instagram.profile_posts import InstagramProfilePostsActor
-from src.actors.instagram.profile_queenlike import InstagramProfileQueenlikeActor
+from src.helpers import metering
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 # ------------------------------------------------------------------
 # Task parameters — edit these before running
 # ------------------------------------------------------------------
+
+# Who pays (no org, no spend): a customer org id, or a tasks.xlsx theme with an org,
+# or platform = True for internal work (the platform org, scope global).
+org_id = None
+theme = None
+platform = False
+max_cost_usd = None                # cap for the whole run (Apify max_total_charge_usd)
 
 # Which Instagram actor to run.
 #   "default"   → InstagramProfilePostsActor   (apify shu8hvrXbJbY3Eb9W; search_params = profile/post URLs)
@@ -97,10 +111,12 @@ publish = False
 # Run
 # ------------------------------------------------------------------
 
-if actor_choice == "queenlike":
-    actor = InstagramProfileQueenlikeActor()
-else:
-    actor = InstagramProfilePostsActor()
+usage_ledger = metering.configure_usage_ledger()
+usage_meter = metering.meter(event_key=f"ig-profile-posts:{metering.new_session()}:{task_id}", org_id=org_id,
+                             theme=theme, platform=platform, ledger=usage_ledger, what="run_instagram_profile_posts")
+actor, recorder = metering.metered_actor(
+    "instagram_profile_queenlike" if actor_choice == "queenlike" else "instagram_profile_posts",
+    usage_meter, search_item_budget=max_results * len(search_params), cost_budget_usd=max_cost_usd)
 
 kwargs = {
     "task_id": task_id,

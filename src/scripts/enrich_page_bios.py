@@ -14,7 +14,17 @@ so the next run sees the bios. Nothing is written to Elasticsearch.
     [--refresh]  re-scrape even when the cache already has a bio
     [--dry-run]  list what would be scraped, no Apify call
 
-Env: ``APIFI_API_TOKEN`` (repo ``.env``). Cost: pages scraper, ≈ $0.01 per profile.
+Who pays (rate_limiting.md §2.1, §2.3): the scrape goes through ``usage_client.apify.run``
+(kind ``profiles``; admitted against the org's limits, capped to the profiles asked for and
+``--max-cost-usd``, one ``usage_events`` row per Apify run, event key
+``page-bios:<session>``). Pass ``--org`` or ``--theme`` (the customer the classification is
+for), or ``--platform`` for internal work; without one the scrape is refused (no org, no
+spend).
+
+    python -m src.scripts.enrich_page_bios --report cache/runs/classify_users_X.json --org 105
+
+Env: ``APIFI_API_TOKEN`` (repo ``.env``), ``USAGE_DB_URI`` (or ``DATABASE_URI``; without a
+ledger admission fails closed). Cost: pages scraper, ≈ $0.01 per profile.
 """
 from __future__ import annotations
 
@@ -46,13 +56,15 @@ def urls_from_report(path: str) -> List[str]:
                    if a.get("tier") == "profile" and a.get("n_posts") and a.get("profile_url")})
 
 
-def main(argv=None) -> Dict[str, int]:
+def main(argv=None, *, apify_client=None, ledger=None) -> Dict[str, int]:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     ap = argparse.ArgumentParser(description="Scrape and cache page bios for WS-4.")
     ap.add_argument("--report", help="classify_users JSON report: take its post-author profile urls")
     ap.add_argument("--urls", nargs="*", default=None, help="explicit profile/page urls")
     ap.add_argument("--refresh", action="store_true", help="re-scrape cached profiles too")
     ap.add_argument("--dry-run", action="store_true")
+    from src.helpers import metering
+    metering.add_usage_args(ap)
     args = ap.parse_args(argv)
     load_dotenv()
 
@@ -79,9 +91,15 @@ def main(argv=None) -> Dict[str, int]:
             print("  ", u)
         return {"profiles": len(urls), "scraped": 0}
 
-    from apify_client import ApifyClient
-    from src.actors.actor import _get_apify_token
-    actor = FacebookProfileActor(ApifyClient(_get_apify_token()))
+    if ledger is None:
+        ledger = metering.configure_usage_ledger()
+    usage_meter = metering.meter(event_key=f"page-bios:{metering.new_session()}", org_id=args.org,
+                                 theme=args.theme, platform=args.platform, ledger=ledger,
+                                 kind="profiles", what="enrich_page_bios")
+    client, _recorder = metering.metered_client(
+        usage_meter, apify_client=apify_client, default_purpose="profiles",
+        max_items_per_call=len(todo), cost_budget_usd=args.max_cost_usd)
+    actor = FacebookProfileActor(client)
     raw = actor.scrape_pages(todo)
     print(f"actor returned {len(raw)} items")
 
