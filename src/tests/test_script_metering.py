@@ -89,8 +89,8 @@ class TestRunCommentTasks:
         assert ev.event_id.startswith("apify-client:comment-tasks:s1:deep:105:comments:apifyrun-")
         (call,) = apify.calls
         assert call["kwargs"]["max_items"] == 1 * 50            # posts × depth
-        # admitted = 50 items × $0.002 list price, below the $1 budget
-        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.1)
+        # admitted = 50 comments × $0.002 + the $0.001 start (apify/facebook-comments-scraper), below the $1 budget
+        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.101)
 
     def test_cost_budget_caps_items(self, sample_facebook_comments):
         from src.scripts import run_comment_tasks as rct
@@ -100,8 +100,8 @@ class TestRunCommentTasks:
         meter = rct.tier_meter(_task_file(), "deep", session="s1", org_id=105, ledger=FakeLedger())
         rct.execute(run, "t", publish=False, usage_meter=meter, cost_budget_usd=0.01, apify_client=apify)
         (call,) = apify.calls
-        assert call["kwargs"]["max_items"] == 5                 # $0.01 / $0.002 per comment
-        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.01)
+        assert call["kwargs"]["max_items"] == 4                 # ($0.01 - $0.001 start) / $0.002 per comment
+        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.009)
 
     def test_task_file_org_is_used(self):
         from src.scripts import run_comment_tasks as rct
@@ -162,8 +162,8 @@ class TestEnrichPageBios:
         assert (ev.org_id, ev.kind) == (102, "profiles")
         assert ev.event_id.startswith("apify-client:page-bios:")
         (call,) = apify.calls
-        assert call["kwargs"]["max_items"] == 1                 # 2 asked, $0.015 buys 1 at $0.01
-        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.01)
+        assert call["kwargs"]["max_items"] == 1                 # 2 asked, $0.015 buys 1 at $0.0082
+        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.0082)
 
     def test_items_capped_to_profiles_asked_for(self):
         apify = FakeApify({})

@@ -233,9 +233,9 @@ Indexes:
 | `apify_run_id` | `text NOT NULL UNIQUE` | idempotency on redelivery |
 | `apify_status` | `text` | |
 | `items` | `integer` | dataset items |
-| `cost_usd` | `numeric(12,6) NULL` | Apify run `usageTotalUsd` |
-| `estimated` | `boolean NOT NULL DEFAULT false` | true if computed from list price |
-| `usage` | `jsonb NULL` | Apify `usage` object, verbatim |
+| `cost_usd` | `numeric(12,6) NULL` | Apify run `usageTotalUsd` **once settled** (§7.5); our own computed figure while not |
+| `estimated` | `boolean NOT NULL DEFAULT false` | true while the cost is our own figure (Apify's charges not settled in time) or a list-price fallback; `reconcile_costs` sets it false |
+| `usage` | `jsonb NULL` | Apify `usage` object (platform-usage actors) + pay-per-event `chargedEventCounts` / `accountedChargedEventCounts` / `eventUsage` + `settled` / `computed_usd` |
 | `usage_event_id` | `text NULL` | `usage_events.event_id`. No FK, so this table doesn't depend on P0.3 ordering |
 | `started_at`, `finished_at` | `timestamptz` | |
 
@@ -398,7 +398,12 @@ requested ─admit refused─> blocked              (terminal; usage_blocks row)
 ```
 
 - `partial`: some Apify calls succeeded and their cost was recorded, but a later stage
-  or publish failed. The money is spent, so the stats and cost are still written.
+  failed, the broker went away, or publishing broke broadly. The money is spent, so the
+  stats and cost are still written. A few unpublishable documents don't make a run
+  partial (2026-10-07): with the search call(s) succeeded and failed publishes ≤ max(1,
+  10% of the documents to publish) the run is `succeeded`, with `stats.documents_failed`
+  / `documents_failed_urls`. Attached articles that can't be serialized are dropped
+  (`stats.attached_news_dropped`), never counted against their post.
 - The worker claims a run with `UPDATE crawl_runs SET status='running' … WHERE run_id=$1
   AND status='queued' RETURNING`. A RabbitMQ redelivery of a run that is already
   `running` or terminal is acked and dropped.
@@ -746,9 +751,16 @@ design supplies the inputs and stores the outputs.
     90-day cache (`stats_max_age_days`)
 - `items_low`: cold, the `cap_floor` probe. Warm (≥ 3 runs), the p10 of the task's
   `items_paid`.
-- `usd = items × usage_client.prices` per actor. Measured magnitudes:
-  $2.25–4 / 1,000 paid items, profiles ~$10 / 1,000 (`business_agent/docs/platform.md`
-  §Cost model).
+- `usd = starts × start price + items × price per result`, per actor, from
+  `usage_client.prices.apify_unit(actor_id, kind)` — the actor's current Apify pricing
+  (`GET /v2/acts/{id}` → `pricingInfos`, 24 h cache, static table when unreachable;
+  usage_client README § Apify actor prices), falling back to the per-kind
+  `UNIT_USD` only for an actor it doesn't know. 2026-10-07 BRONZE prices:
+  `scrapeforge/facebook-search-posts` $0.00005 / start + $0.00259 / result (one start per
+  search param), `apify/facebook-posts-scraper` $0.001 + $0.004 / post (+ $0.001 date
+  filter), comments `apify/facebook-comments-scraper` $0.001 + $0.002 / comment, profiles
+  `apify/facebook-pages-scraper` $0.0082 / page. Older measured magnitudes: $2.25–4 / 1,000
+  paid items, profiles ~$10 / 1,000 (`business_agent/docs/platform.md` §Cost model).
 - Admission uses `estimate_usd_high` (agent_framework §5.1: "the budget gate applies to
   the high end").
 - Endpoint: `POST /crawl/tasks/estimate`. This is the backend half of `estimate_crawl`
@@ -778,6 +790,32 @@ default is $0.02/post (`select_posts_for_comments.py:62-64`). The measured figur
 | Per org / day | `usage_limits` default `apify` $15/day; `maxItems` capped to remaining budget | `rate_limiting.md` §2.4, §2.5, §2.7 |
 | Per request | $2 / 2,000 docs rule applies to API-triggered runs | `rate_limiting.md` §2.4 (decided 2026-10-05) |
 | Scheduler | auto-pause after `consecutive_failures`; one live run per task (§2.5 unique index) | this doc |
+
+### 7.5 Recording the real cost (2026-10-07)
+
+Found on the local stack: every call was recorded with only the actor-start charge — 9
+calls, $0.0021 recorded vs $0.6727 billed (e.g. run `Oy7YlPPjj7gF8Q203`: $0.00005
+recorded, `usageTotalUsd` $0.07516 = 1 × `apify-actor-start` $0.00005 + 29 ×
+`apify-default-dataset-item` $0.00259; comment and profile calls recorded $0). Pay-per-event
+actors charge their per-result events seconds after the run turns `SUCCEEDED`; the run
+object `call()` returns, and an immediate re-read, still show only the start.
+
+- **Settle** (`usage_client.apify_cost.settle_run`, used by `usage_client.apify.run`, so
+  the worker, `run_searches.py` and every script share it): re-read the run until it is
+  terminal, `usageTotalUsd` and the charged event counts are equal on two consecutive
+  reads, and the per-result event count covers the dataset items (or the run's charge cap
+  is reached); ≤ 60 s, backoff 1 → 8 s. The worker's `crawl_run_calls` row and the
+  `usage_events` row take that one reading.
+- **Our own figure** (`cost_from_events`): Σ billed event counts × event price from the
+  run's `pricingInfo` (`PAY_PER_EVENT`), items × price (`PRICE_PER_DATASET_ITEM`), Apify's
+  total for rental / platform-usage actors. Cross-check when settled (ERROR log on a
+  mismatch > $0.005 and 5%); the recorded value with `estimated=true` when Apify hasn't
+  settled in time (max of the partial total, the billed events, start + items × price,
+  capped at the charge cap) — those runs are spooled for reconciliation.
+- **Reconcile** later: `src/scripts/reconcile_costs.py` (`crawl_run_calls` + terminal
+  `crawl_runs.cost_usd` + the ledger) and `python -m usage_client.reconcile` (ledger only,
+  e.g. hand runs). The ledger is append-only: a difference becomes a
+  `<event_id>:correction` row, never an UPDATE.
 
 ---
 

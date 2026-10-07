@@ -25,6 +25,15 @@ The ``usage_blocks`` row is written by ``usage_client`` (path ``worker:apify-cli
 ``crawl_runs.error`` / ``stats.usage_refusal`` carry the reason. A message without a
 valid org writes ``usage_blocks(reason='missing_org')`` itself (best effort).
 
+Run outcome (design §5.2): ``succeeded`` when the search call(s) succeeded and at most
+``max(1, 10%)`` of the documents to publish (main docs + attached articles) failed to
+publish — the failures are in ``stats.documents_failed`` / ``stats.documents_failed_urls``
+(first ``FAILED_URLS_KEPT``, truncated); ``partial`` for real partial work: money spent,
+then a stage raised, the broker went away (``AMQPError``), a search call did not succeed,
+or more documents failed than tolerated. An attached article that cannot be serialized
+(e.g. fetched with an empty body: "Missing required field: body") is dropped
+(``stats.attached_news_dropped``), never a failure of its parent post.
+
 Transport-free: ``handle_message(body, deps)`` returns ``"ack"`` or ``"requeue"`` and the
 consumer (``src/run_crawl_worker.py``) acks accordingly, so this module is unit-testable
 with a fake DB, a fake Apify client and a fake publisher.
@@ -54,6 +63,12 @@ RELEASED = "queued"
 BLOCK_PATH = f"worker:{SERVICE}"
 
 MESSAGE_TYPE = "crawl_run"
+
+# A publish failure rate a succeeded run tolerates: failures <= max(1, 10% of the documents
+# to publish). Above it (or a broker outage) the run is partial.
+PUBLISH_FAILURE_TOLERANCE = 0.10
+FAILED_URLS_KEPT = 20
+FAILED_URL_MAX_LEN = 300
 
 # Keys in actor_params that set the per-call result count; clamped to the run's max_items.
 RESULT_COUNT_KEYS = ("results_limit", "max_articles")
@@ -435,6 +450,7 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
     publish_failures = 0
     attached_out = 0
     main_out = 0
+    pub = PublishResult()
     stats: Dict[str, Any] = {"worker": deps.worker_name, "trace_id": msg.get("trace_id")}
 
     try:
@@ -468,12 +484,11 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
             main_out, attached_out = len(docs), attached
             logger.info("run %s: dry run — %d documents saved to %s (not published)", run_id, len(expanded), output_path)
         else:
-            main_out, attached_out, publish_failures, publish_error = _publish_all(docs, deps.publish or _default_publish)
-            if publish_error:
-                raise RuntimeError(publish_error)
-        status = "partial" if publish_failures else "succeeded"
-        if publish_failures:
-            error = f"{publish_failures} document(s) failed to publish"
+            pub = _publish_all(docs, deps.publish or _default_publish)
+            main_out, attached_out, publish_failures = pub.main_ok, pub.attached_ok, pub.failures
+            if pub.fatal:
+                raise RuntimeError(pub.fatal)
+        status, error = run_outcome(recorder, publish_failures, pub.to_publish)
     except Exception as exc:
         status = "partial" if recorder.calls else "failed"
         error = f"{type(exc).__name__}: {exc}"
@@ -506,7 +521,12 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
         "funnel": dict(getattr(actor, "funnel", {}) or {}),
         "calls": len(recorder.calls),
         "publish_failures": publish_failures,
+        "documents_to_publish": pub.to_publish,
+        "documents_failed": pub.failures,
+        "documents_failed_urls": pub.failed_urls,
+        "attached_news_dropped": pub.attached_dropped,
         "cost_unknown_calls": sum(1 for c in recorder.calls if c.cost_usd is None),
+        "cost_estimated_calls": sum(1 for c in recorder.calls if c.estimated),
     })
     written = db.finish_run(run_id, status, error, output_path, counters, stats)
     logger.info("run %s finished: status=%s items_paid=%s items_new=%s cost_usd=%s error=%s",
@@ -564,29 +584,74 @@ def _release(db: Any, run_id: int, error: str) -> bool:
         return False
 
 
-def _publish_all(docs: List[Any], publish: Callable[[Any], None]) -> Tuple[int, int, int, Optional[str]]:
-    """Publish docs + attached news through ``publish_document``. Returns
-    (main published, attached published, failures, fatal error)."""
+@dataclass
+class PublishResult:
+    main_ok: int = 0
+    attached_ok: int = 0
+    failures: int = 0
+    to_publish: int = 0
+    attached_dropped: int = 0
+    failed_urls: List[str] = field(default_factory=list)
+    fatal: Optional[str] = None
+
+
+def run_outcome(recorder: CallRecorder, failures: int, to_publish: int) -> Tuple[str, Optional[str]]:
+    """(status, error) of a run whose stages all returned (see the module docstring)."""
+    paid = [c for c in recorder.calls if c.purpose == recorder.default_purpose]
+    search_ok = all((c.apify_status or "SUCCEEDED") == "SUCCEEDED" for c in paid)
+    if not failures:
+        return "succeeded", None
+    tolerated = max(1.0, PUBLISH_FAILURE_TOLERANCE * to_publish)
+    if search_ok and failures <= tolerated:
+        logger.warning("%d of %d document(s) failed to publish (tolerated: <= %.1f); run succeeded",
+                       failures, to_publish, tolerated)
+        return "succeeded", None
+    return "partial", f"{failures} of {to_publish} document(s) failed to publish"
+
+
+def _url_of(item: Any) -> str:
+    return str((getattr(item, "data", None) or {}).get("url") or "?")[:FAILED_URL_MAX_LEN]
+
+
+def _publish_all(docs: List[Any], publish: Callable[[Any], None]) -> PublishResult:
+    """Publish docs + attached news through ``publish_document``.
+
+    An attached article that can't be serialized (``to_final_schema`` raises, e.g. an empty
+    body) is dropped and logged — it never counts against its parent post. A broker error
+    (``AMQPError``) stops publishing (``fatal``)."""
     from pika.exceptions import AMQPError
 
-    main_ok = attached_ok = failures = 0
+    r = PublishResult()
     for doc in docs:
         for item, is_attached in ((doc, False), (getattr(doc, "attached_news", None), True)):
             if item is None:
                 continue
+            if is_attached:
+                try:
+                    item.to_final_schema()
+                except Exception as exc:
+                    r.attached_dropped += 1
+                    logger.warning("dropping attached article %s of post %s: %s", _url_of(item), _url_of(doc), exc)
+                    continue
+            r.to_publish += 1
             try:
                 publish(item)
             except AMQPError as exc:
-                return main_ok, attached_ok, failures + 1, f"RabbitMQ publish failed: {exc}"
+                r.failures += 1
+                r.failed_urls.append(_url_of(item))
+                r.fatal = f"RabbitMQ publish failed: {exc}"
+                return r
             except Exception as exc:
-                failures += 1
-                logger.error("Error publishing document %s: %s", getattr(item, "data", {}).get("url"), exc)
+                r.failures += 1
+                if len(r.failed_urls) < FAILED_URLS_KEPT:
+                    r.failed_urls.append(_url_of(item))
+                logger.error("Error publishing document %s: %s", _url_of(item), exc)
                 continue
             if is_attached:
-                attached_ok += 1
+                r.attached_ok += 1
             else:
-                main_ok += 1
-    return main_ok, attached_ok, failures, None
+                r.main_ok += 1
+    return r
 
 
 def _save_dry_run(output_dir: str, actor_class: str, run_id: int, expanded: List[Any]) -> str:
