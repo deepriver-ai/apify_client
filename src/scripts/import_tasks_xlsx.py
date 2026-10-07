@@ -120,8 +120,10 @@ COMMON_PARAM_KEYS = {"check_existing_elasticsearch", "skip_existing_filter", "re
 ACTOR_PARAM_KEYS: Dict[str, set] = {
     "facebook_keyword_search": {"enrich_author_after_likes", "get_comments_after_likes",
                                 "add_text_from_images", "location_uid", "recent_posts"},
-    # page posts do NOT read the *_after_likes thresholds (kwargs.get in facebook/posts.py)
-    "facebook_page_posts": {"add_text_from_images", "add_subtitles", "add_ai_transcription"},
+    # page posts read the *_after_likes thresholds since the crawl-worker branch
+    # (ApifyActor._gate_by_likes via facebook/posts.py enrich_page_authors / enrich_post_comments)
+    "facebook_page_posts": {"enrich_author_after_likes", "get_comments_after_likes",
+                            "add_text_from_images", "add_subtitles", "add_ai_transcription"},
     "instagram_hashtags": {"keyword_search", "results_type", "video_dir"},
     "instagram_profile_posts": {"keyword_search", "results_type", "video_dir"},
     "instagram_profile_queenlike": {"scrape_type", "output_mode"},

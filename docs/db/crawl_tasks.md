@@ -350,7 +350,7 @@ Keys each actor reads (`kwargs.get` in `src/actors/**`), excluding the common on
 | actor_class | actor-specific keys |
 |---|---|
 | `facebook_keyword_search` | `enrich_author_after_likes`, `get_comments_after_likes`, `add_text_from_images`, `location_uid`, `recent_posts`, `snippet_max_len`, `stats_max_age_days`, `results_limit` |
-| `facebook_page_posts` | `add_text_from_images`, `download_*`, `add_subtitles`, `add_ai_transcription`, `stats_max_age_days`, `results_limit` |
+| `facebook_page_posts` | `enrich_author_after_likes`, `get_comments_after_likes` (read since 2026-10-06; before, the page actor fetched comments/profiles for every post), `add_text_from_images`, `download_*`, `add_subtitles`, `add_ai_transcription`, `stats_max_age_days`, `results_limit` |
 | `instagram_hashtags` / `instagram_profile_posts` | `keyword_search`, `results_type`, `stats_max_age_days`, `download_*`, `video_dir`, `results_limit` |
 | `instagram_profile_queenlike` | `scrape_type`, `output_mode`, `results_limit` |
 | `tiktok_posts` | `get_comments_after_likes`, `apify_input`, `results_limit` |

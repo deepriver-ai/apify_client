@@ -156,9 +156,18 @@ def test_google_news_timeframe_and_tiktok_cap():
 
 def test_unknown_actor_param_key_is_warning_only():
     [p] = _plan(_row(actor_class="facebook_page_posts", search_params="https://fb.com/x",
-                     actor_params='{"get_comments_after_likes": 10}'))
+                     actor_params='{"keyword_search": true}'))
     assert p.action == "insert"
     assert any("not read by facebook_page_posts" in w for w in p.warnings)
+
+
+def test_page_posts_like_thresholds_are_known_keys():
+    """facebook_page_posts reads get_comments_after_likes / enrich_author_after_likes
+    (crawl-worker branch, ApifyActor._gate_by_likes) — no 'not read by' warning."""
+    [p] = _plan(_row(actor_class="facebook_page_posts", search_params="https://fb.com/x",
+                     actor_params='{"get_comments_after_likes": 10, "enrich_author_after_likes": 30}'))
+    assert p.action == "insert"
+    assert not any("not read by" in w for w in p.warnings)
 
 
 def test_params_schema_from_db_takes_precedence():
