@@ -381,8 +381,9 @@ lift the cap (`resultsPerPage`, `maxItems`).
 - `draft`: proposed by a customer or agent ("read and propose", `rate_limiting.md` §0;
   sprint §3 Line B "Propose" tools such as `plan_crawl`). Never runs. It becomes
   `active` when we approve it.
-- `paused`: the old `enabled=false`, an untracked linked search (§2.3), or automatic
-  after `consecutive_failures`.
+- `paused`: the old `enabled=false`, or an untracked linked search (§2.3). Repeated
+  failures auto-pause the **schedule** (`crawl_schedules.active = false` +
+  `paused_reason`, §6.2.2), not the task.
 - `retired`: soft-delete (`retired_at`). Its runs stay queryable. This mirrors the
   soft-retire convention of `stance_entries`.
 
@@ -520,10 +521,14 @@ Points the code had to settle. The message shape above is unchanged.
   would-be-published counts, so the §9.2 parallel run can compare yields.
 - **Comments runs** read posts by `crawl_comment_request_posts.run_id`, so **the
   approve endpoint must set `run_id` on each post**. `max_comments` is the tier depth.
-- **Schedules**: only `trigger='schedule'` runs update `crawl_schedules`. `partial` counts
-  as a failure there, so the window does not advance.
-- **Not in the worker**: the stale-heartbeat reaper (§5.2) and the WS-4
-  `classify_users` pass (Q9).
+- **Schedules**: only `trigger='schedule'` runs update `crawl_schedules`, and only
+  `last_run_id` / `last_success_at` (2026-10-06, branch `crawl-scheduler`: the worker no
+  longer touches `consecutive_failures`, and skips the update when its run was reaped
+  meanwhile — `finish_run` then reports the row was no longer `running`). `partial`
+  counts as a failure, so the window does not advance. The failure response is the
+  scheduler's (§6.2.2).
+- **Not in the worker**: the stale-heartbeat reaper (§5.2, now in the poller, §6.2.1) and
+  the WS-4 `classify_users` pass (Q9).
 
 ### 6.2 Scheduling and newest-first incrementality
 
@@ -536,11 +541,114 @@ FOR UPDATE OF s SKIP LOCKED
 ```
 
 For each due task it runs the same estimate → admit → insert → enqueue path, then sets
-`next_run_at += every`. Where the scheduler lives is open (Q3).
+`next_run_at += every`. The scheduler lives in the poller (Q3, decided 2026-10-06; see
+§6.2.1).
 
 Run window: `window_since = last_success.newest_item_at − window_overlap`, or
 `now() − period` on the first run. Scheduled runs pass `min_date = window_since` and
 `period = NULL`; the two are mutually exclusive.
+
+#### 6.2.1 As implemented (2026-10-06, branch `crawl-scheduler` in three repos)
+
+- **Where.** `search-sentiment-poller-tasker`, `runsearches/crawl_scheduler.py`, a thread
+  of its own (`CRAWL_SCHEDULER_ENABLED=1`, default off; tick `CRAWL_SCHEDULER_TICK_SECONDS`
+  = 60) so a long search pass never delays it. It connects to userdb as `backend` (UPDATE
+  on `crawl_runs`, `crawl_schedules`, `crawl_comment_requests`). Each tick does three
+  steps, in order: reap, settle, dispatch.
+- **Dispatch goes through the backend.** The poller never inserts `crawl_runs` or
+  enqueues. For each due schedule (the query above, one row per transaction) it calls
+  `POST /crawl/runs/request {task_id, trigger: "schedule", trace_id: "sched-<task>-…"}`
+  as a dedicated machine user (`service@deepriver.ai` on stg, member of every scheduling
+  org, with a role/plan that has the `/crawl/*` RBAC rows). Login returns one JWT per
+  org; tokens last 12 h, so the client re-logs in 30 min before `exp`, when an org is
+  missing, and once on an auth failure. Estimate, admission (rate limits), the
+  one-live-run rule, insert and enqueue all stay in the endpoint. Then
+  `next_run_at += every`, repeated past missed slots (a poller that was down fires once,
+  not once per slot), **whatever the outcome**: queued, blocked, duplicate or error.
+- **Window (backend, `trigger: "schedule"`).** `window_since` = the newest `succeeded`
+  crawl run of the task (any trigger) `.newest_item_at − window_overlap`. When that run
+  found nothing, or the result would fall before that run's own `window_since`, its
+  `window_since` is carried forward, so the window never moves backwards. With no success
+  yet, the task's own window is used. A task `min_date` stays a floor. `failed` /
+  `partial` / `blocked` / `cancelled` runs never move it, so a retry re-covers everything
+  since the last success. The endpoint refuses `trigger: "schedule"` for a task with no
+  schedule row or a paused one (409), and admits it exactly like an `api` run (endpoint `/crawl/runs/request`, so the
+  same per-request limits apply). `trigger: "schedule"` is open to every org role that may launch runs
+  (Oscar 2026-10-07): attribution is by `org_id` + `requested_by` anyway.
+- **Reaper** (§5.2).
+  - `running` with `heartbeat_at` older than 5 min → `failed`,
+    `error='stale heartbeat'` (a crashed worker; the worker heartbeat is 60 s).
+  - `queued` → `failed`, `error='not claimed'`, **only when the workers are down**
+    (Oscar 2026-10-07). The run waited more than 5 min **and** no run was claimed
+    (`started_at`) **and** no running run heartbeated in those 5 min.
+  - A backlog behind busy workers is never failed, however long it waits.
+  - Thresholds: `CRAWL_REAPER_STALE_HEARTBEAT_MINUTES`, `CRAWL_REAPER_UNCLAIMED_MINUTES`.
+  - The reaper covers every trigger and kind. A reaped comments run closes its comment
+    request once none of its runs is open.
+  - A message for a reaped run that reaches a worker later is acked and dropped (the
+    claim only takes `queued` rows).
+- **Regular slot and stagger** (Oscar 2026-10-07).
+  - `next_run_at` is the regular, anchored slot (e.g. 08:00). It fires at
+    `next_run_at − offset(task)`, where `offset = (task_id × 2654435761) mod
+    CRAWL_SCHEDULER_SPREAD_MINUTES` in seconds (default 0).
+  - With 30, a batch anchored at 08:00 fires over 07:30–08:00, the same minute every day.
+  - Advancing adds `every` to the anchor, so the cadence is stable.
+  - Retries live in `crawl_schedules.retry_at` (migration
+    `media-backend-paid/docs/db/migrations/2026-10-07_crawl_schedules_retry_at_userdb.sql`,
+    pending), never in `next_run_at`. Every dispatch clears it.
+- **Worker concurrency** (`CRAWL_WORKER_CONCURRENCY`, default 1, recommended 4). The
+  worker runs N parallel runs in one process: prefetch N, a thread and heartbeat per
+  run, manual ack per message.
+  - Shared caches are locked, merged and atomically replaced. Publishing is serialized.
+  - It is not N processes, because separate processes would overwrite each other's cache
+    files.
+  - Apify STARTER allows 32 concurrent actor runs and 64 GB. A run starts up to 3 actors
+    of 1–4 GB. With N > 1, N is capped once at startup by `GET /v2/users/me/limits`:
+    `min(jobs // 3, GB // 12)`, which is 5 on STARTER.
+
+#### 6.2.2 Failure → retry, backoff, auto-pause
+
+- Every terminal scheduled run (`succeeded` / `partial` / `failed`, reaped ones
+  included) is **settled once** by the poller. The marker is
+  `crawl_runs.stats.scheduler = {outcome, consecutive_failures, retry_at, …}`.
+- **Success** sets `consecutive_failures = 0` (plus `last_run_id` and `last_success_at`).
+- **Failure** increments `consecutive_failures` and retries instead of waiting for the
+  next slot: `retry_at = now + backoff`, when that is earlier than the next regular fire
+  time.
+  - Backoff is 15 min, 30 min, 60 min… (`CRAWL_SCHEDULER_BACKOFF_MINUTES` ×
+    2^(n−1)), capped at `every`.
+  - The retry's window still starts from the last success, so nothing is lost.
+  - Failures are:
+    - a scheduled run ending `failed` / `partial`;
+    - (Oscar 2026-10-07) a request the backend refused **without a run row**: 403
+      RBAC/plan, 400/404 validation, 409 task inactive or actor disabled, login or
+      membership errors;
+    - transient errors (no HTTP answer, 5xx without a run). These back off the same way
+      but never pause.
+- **3 consecutive failures** (`CRAWL_SCHEDULER_MAX_FAILURES`) set `active = false` and
+  `paused_reason = 'auto-paused <ts> after 3 consecutive failed scheduled runs (last: run
+  N <status>: <error>)'`, logged as `!!! SCHEDULE PAUSED`. The task's own `status` is
+  left alone. `/crawl/tasks/schedule {active: true}` re-enables the schedule and resets
+  the counter and the reason.
+- A run **blocked by admission** (budget) is not a failure. Neither is a `cancelled`
+  duplicate. Neither is settled, and the normal slot stands.
+
+**Split of schedule bookkeeping** (avoids double counting):
+
+| `crawl_schedules` column | Written by |
+|---|---|
+| `last_run_id`, `last_success_at` | worker at finish, for immediate feedback (skipped if its run was reaped), and poller on settle (covers reaped runs) |
+| `consecutive_failures` | poller only (settle and dispatch). The worker's role keeps the column grant, but the worker no longer writes it |
+| `next_run_at`, `retry_at`, `active`, `paused_reason` | poller only. The worker's role has no grant on `next_run_at` / `retry_at` / `active`. `/crawl/tasks/schedule` clears `retry_at` on `active: true` or a new `next_run_at` |
+| everything else | backend `/crawl/tasks/schedule` |
+
+Tests: poller unit tests (policy, dispatch, backend client; HTTP and store mocked) and
+DB tests (reaper / settle / dispatch SQL on a throwaway userdb with an injected clock);
+backend endpoint tests for `trigger`. There is also a local e2e: poller tick → backend
+over HTTP (admission faked) → local `rabbit_enqueuer` → `document_processing_dev` /
+`dev_crawl_runs` → worker (Apify mocked, dry runs). It covered a schedule advancing, a
+blocked run, a worker killed mid-run → reaped → 15 min retry, then not claimed twice →
+30 min → auto-pause.
 
 How far the window helps depends on `crawl_actor_classes.window_support` (from
 agent_framework §5.1 and the actor code):
@@ -733,7 +841,7 @@ So the importer maps by `theme` and uses `ids.json` only to warn, never as the k
 |---|---|---|
 | Q1 | Orgs for `totalenergies_guadalupe`, the six theme-less legacy themes, and Orizaba (47 vs the new org) | `_guadalupe` → 62. Don't import the legacy themes. Import Orizaba when the new org exists |
 | Q2 | Import disabled rows of dropped themes (sjdr, morelia_descifra, queretaro) as `retired`, or skip them? | import as `retired` (keeps history and the `legacy_task_id` → filter-cache link) |
-| Q3 | Where does the scheduler live: a tick in `search-sentiment-poller-tasker` (has userdb + 1-min loop), the backend, or the `apify_client` worker? | poller tick, admitting through `usage_client.admission` (same code as the backend) |
+| Q3 | Where does the scheduler live: a tick in `search-sentiment-poller-tasker` (has userdb + 1-min loop), the backend, or the `apify_client` worker? | **Decided 2026-10-06 (Oscar)**: in the poller, which requests each due run **through the backend** (`POST /crawl/runs/request`, `trigger: "schedule"`, as a machine user), so estimate, admission, insert and enqueue stay in one place. The same tick reaps stale runs (heartbeat > 5 min → `failed` 'stale heartbeat'; queued > 5 min → `failed` 'not claimed'). It retries failures with backoff (15/30/60 min… capped at `every`, window still from the last success). After 3 consecutive failures it auto-pauses the schedule. Blocked runs are not failures. Worker/poller bookkeeping split: §6.2.2 |
 | Q4 | Run queue vhost: `document_processing_stg`/prod (user logic, touches userdb) while documents still publish to the document vhost — OK to have two connections? | yes, consume user-logic vhost, publish documents vhost; dev = `document_processing_dev` for both |
 | Q5 | DB role for the worker | **Decided 2026-10-06**: dedicated `crawler` group role (NOLOGIN, holds grants) + `crawler_worker` login (conn limit 10, 60 s statement/idle timeouts): SELECT on `crawl_*` + `user_searches(query_id, org_id)`; INSERT/UPDATE `crawl_runs`; INSERT `crawl_run_calls`; column UPDATEs on schedules / comment requests / posts; INSERT `usage_events` once it exists. Script: `media-backend-paid/docs/db/migrations/2026-10-06_crawl_worker_role_userdb.sql` (password via `-v crawler_password=`) |
 | Q6 | Split the duplicate legacy ids 35/36/37 (lose one cache pass) or keep the shared key? | split |

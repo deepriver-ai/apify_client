@@ -17,9 +17,24 @@ Two RabbitMQ connections (Q4):
   ``RABBIT_*`` variables exactly as for ``run_searches.py``. Opened only when a
   non-dry run publishes.
 
-Manual ack after the run is finished (prefetch 1); the run executes on a worker thread
-so the consuming connection keeps its heartbeats during long actor runs. A message
-whose run is not ``queued`` (redelivery, cancelled) is acked and dropped.
+Manual ack after the run is finished; each run executes on its own thread (with its own
+``heartbeat_at`` beat) so the consuming connection keeps its heartbeats during long
+actor runs. A message whose run is not ``queued`` (redelivery, cancelled) is acked and
+dropped.
+
+**Concurrency** (``CRAWL_WORKER_CONCURRENCY``, default 1, recommended 4): prefetch N, so
+up to N runs execute in parallel in this process, each acked when it finishes. Threads
+in one process rather than N processes: the on-disk caches (filter cache, users cache,
+unknown sources) are shared in-process and saved under locks with merge + atomic
+replace, and document publishing (one pika connection) is serialized; N processes would
+each keep their own copy of those caches and overwrite each other's files. Sizing: the
+Apify STARTER plan allows 32 concurrent actor runs and 64 GB actor memory; a run starts
+up to 3 actors (search → comments → profiles) of 1–4 GB, so 4 runs ≈ 12 actors / ≤ 48 GB,
+leaving room for hand runs (``run_searches.py``, comment scripts) on the same account.
+When N > 1 the worker reads ``GET /v2/users/me/limits`` once at startup (free, no actor
+run) and lowers N to ``min(maxConcurrentActorJobs // A, maxActorMemoryGbytes // (A × G))``
+with A = ``CRAWL_WORKER_ACTORS_PER_RUN`` (3) and G = ``CRAWL_WORKER_GB_PER_ACTOR`` (4);
+``CRAWL_WORKER_APIFY_LIMIT_CHECK=0`` skips it, and a failed lookup keeps N.
 
 Metering: every Apify call goes through ``usage_client.apify.run`` (admit → cap → run →
 one ``usage_events`` row per Apify run); see ``src/worker/runner.py`` for how an
@@ -117,7 +132,47 @@ def configure_usage_ledger():
     return usage_ledger.configure(dsn, spool_dir=os.getenv("USAGE_SPOOL_DIR") or DEFAULT_USAGE_SPOOL_DIR)
 
 
-def consume(deps, queue: str, once: bool = False) -> None:
+def apify_limit_cap(limits: dict, actors_per_run: int, gb_per_actor: float) -> int | None:
+    """Upper bound on concurrent runs from the Apify account limits
+    (``GET /v2/users/me/limits`` → ``data.limits``); None when unknown."""
+    data = (limits or {}).get("data", limits or {})
+    lim = data.get("limits", data)
+    caps = []
+    if lim.get("maxConcurrentActorJobs"):
+        caps.append(int(lim["maxConcurrentActorJobs"]) // max(actors_per_run, 1))
+    if lim.get("maxActorMemoryGbytes"):
+        caps.append(int(float(lim["maxActorMemoryGbytes"]) // max(actors_per_run * gb_per_actor, 1)))
+    return max(min(caps), 1) if caps else None
+
+
+def _fetch_apify_limits() -> dict:
+    import requests
+
+    from src.actors.actor import _get_apify_token
+
+    resp = requests.get("https://api.apify.com/v2/users/me/limits",
+                        headers={"Authorization": f"Bearer {_get_apify_token()}"}, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def worker_concurrency(fetch_limits=_fetch_apify_limits) -> int:
+    n = max(int(os.getenv("CRAWL_WORKER_CONCURRENCY", "1") or 1), 1)
+    if n == 1 or os.getenv("CRAWL_WORKER_APIFY_LIMIT_CHECK", "1").lower() in ("0", "false", "no"):
+        return n
+    try:
+        cap = apify_limit_cap(fetch_limits(), int(os.getenv("CRAWL_WORKER_ACTORS_PER_RUN", "3")),
+                              float(os.getenv("CRAWL_WORKER_GB_PER_ACTOR", "4")))
+    except Exception as exc:
+        logger.warning("Apify limits lookup failed (%s); keeping CRAWL_WORKER_CONCURRENCY=%d", exc, n)
+        return n
+    if cap is not None and cap < n:
+        logger.warning("CRAWL_WORKER_CONCURRENCY=%d lowered to %d by the Apify account limits", n, cap)
+        return cap
+    return n
+
+
+def consume(deps, queue: str, once: bool = False, concurrency: int = 1) -> None:
     import pika
 
     from src.worker.runner import REQUEUE, handle_message
@@ -127,7 +182,7 @@ def consume(deps, queue: str, once: bool = False) -> None:
     connection = pika.BlockingConnection(params)
     channel = connection.channel()
     channel.queue_declare(queue=queue, durable=True)
-    channel.basic_qos(prefetch_count=1)
+    channel.basic_qos(prefetch_count=max(concurrency, 1))   # N runs in flight, one thread each
 
     def settle(delivery_tag: int, outcome: str) -> None:
         if not channel.is_open:
@@ -155,8 +210,8 @@ def consume(deps, queue: str, once: bool = False) -> None:
                          name=f"crawl-run-{method.delivery_tag}").start()
 
     channel.basic_consume(queue=queue, on_message_callback=on_message, auto_ack=False)
-    logger.info("consuming %s on vhost %s (documents publish to vhost %s, queue %s)",
-                queue, params.virtual_host, os.getenv("RABBIT_VIRTUAL_HOST"), os.getenv("RABBIT_QUEUE"))
+    logger.info("consuming %s on vhost %s, concurrency %d (documents publish to vhost %s, queue %s)",
+                queue, params.virtual_host, concurrency, os.getenv("RABBIT_VIRTUAL_HOST"), os.getenv("RABBIT_QUEUE"))
     try:
         channel.start_consuming()
     finally:
@@ -184,7 +239,7 @@ def main(argv=None) -> None:
     deps = build_deps()
     deps.db.ping()  # fail fast (and loudly) if userdb is unreachable
     deps.db.replay_spool()
-    consume(deps, queue, once=args.once)
+    consume(deps, queue, once=args.once, concurrency=1 if args.once else worker_concurrency())
 
 
 if __name__ == "__main__":

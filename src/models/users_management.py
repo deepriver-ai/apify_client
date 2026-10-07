@@ -11,8 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
+
+from src.helpers.atomic_json import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,8 @@ class UsersManagement:
 
     def __init__(self, cache_path: str = USERS_CACHE_PATH):
         self.cache_path = cache_path
+        # Shared by concurrent crawl runs (one instance per process, models/post.py).
+        self._lock = threading.RLock()
         self._users: Dict[str, Dict[str, Any]] = self._load()
 
     @staticmethod
@@ -74,10 +79,9 @@ class UsersManagement:
 
     def save(self) -> None:
         """Persist user cache to disk."""
-        os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
         try:
-            with open(self.cache_path, "w", encoding="utf-8") as f:
-                json.dump(self._users, f, ensure_ascii=False, indent=2)
+            with self._lock:
+                atomic_write_json(self.cache_path, self._users, ensure_ascii=False, indent=2)
         except OSError:
             logger.warning("Could not save users cache to %s", self.cache_path)
 
@@ -118,11 +122,12 @@ class UsersManagement:
             stats: Dict with keys like ``website_visits``, ``author``, etc.
         """
         key = self._normalize(profile_url)
-        if key not in self._users:
-            self._users[key] = {"profile_url": key}
-        self._users[key].update(stats)
-        self._users[key]["date_stats_updated"] = datetime.now().isoformat()
-        self.save()
+        with self._lock:
+            if key not in self._users:
+                self._users[key] = {"profile_url": key}
+            self._users[key].update(stats)
+            self._users[key]["date_stats_updated"] = datetime.now().isoformat()
+            self.save()
 
     def save_location(self, profile_url: str, location: Dict[str, Any]) -> None:
         """Update user with geocoded location fields.
@@ -132,12 +137,13 @@ class UsersManagement:
             location: Dict with location_author_* fields.
         """
         key = self._normalize(profile_url)
-        if key not in self._users:
-            self._users[key] = {"profile_url": key}
-        for field in LOCATION_FIELDS:
-            if field in location and location[field] is not None:
-                self._users[key][field] = location[field]
-        self.save()
+        with self._lock:
+            if key not in self._users:
+                self._users[key] = {"profile_url": key}
+            for field in LOCATION_FIELDS:
+                if field in location and location[field] is not None:
+                    self._users[key][field] = location[field]
+            self.save()
 
     def get_location(self, profile_url: str) -> Optional[Dict[str, Any]]:
         """Return cached location fields for a user, or None if not available."""

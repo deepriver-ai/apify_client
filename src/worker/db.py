@@ -162,14 +162,16 @@ class CrawlDB:
         )
 
     def update_schedule_after_run(self, task_id: int, run_id: int, success: bool) -> int:
+        """Immediate feedback only: ``last_run_id`` (+ ``last_success_at``). The failure
+        response — ``consecutive_failures``, retry backoff (``retry_at``), auto-pause
+        (``active``/``paused_reason``) — belongs to the poller's crawl scheduler, which
+        settles every terminal scheduled run exactly once (reaped runs included), so the
+        worker must not count failures too (design §6.2 "Split of schedule bookkeeping")."""
         if success:
-            sql = """UPDATE public.crawl_schedules
-                        SET last_run_id = %s, last_success_at = now(), consecutive_failures = 0
+            sql = """UPDATE public.crawl_schedules SET last_run_id = %s, last_success_at = now()
                       WHERE task_id = %s"""
         else:
-            sql = """UPDATE public.crawl_schedules
-                        SET last_run_id = %s, consecutive_failures = consecutive_failures + 1
-                      WHERE task_id = %s"""
+            sql = "UPDATE public.crawl_schedules SET last_run_id = %s WHERE task_id = %s"
         return self._execute(sql, (run_id, task_id))
 
     # --- cost writes (spooled on failure) ---
@@ -177,12 +179,14 @@ class CrawlDB:
         self._write_or_spool("insert_call", row)
 
     def finish_run(self, run_id: int, status: str, error: Optional[str], output_path: Optional[str],
-                   counters: Dict[str, Any], stats: Dict[str, Any]) -> None:
+                   counters: Dict[str, Any], stats: Dict[str, Any]) -> Optional[bool]:
+        """True = written; False = the run was no longer ``running`` (reaped by the
+        scheduler); None = the write failed and was spooled for replay."""
         payload = {"run_id": run_id, "status": status, "error": error, "output_path": output_path,
                    "counters": counters, "stats": stats}
-        self._write_or_spool("finish_run", payload)
+        return self._write_or_spool("finish_run", payload)
 
-    def _apply(self, op: str, payload: Dict[str, Any]) -> None:
+    def _apply(self, op: str, payload: Dict[str, Any]) -> Optional[bool]:
         from psycopg.types.json import Jsonb
 
         if op == "insert_call":
@@ -215,15 +219,17 @@ class CrawlDB:
             if n == 0:
                 logger.warning("finish_run: run %s was no longer 'running' (reaped?) — stats not written",
                                payload["run_id"])
+            return n > 0
         else:
             raise ValueError(f"unknown spool op {op!r}")
 
-    def _write_or_spool(self, op: str, payload: Dict[str, Any]) -> None:
+    def _write_or_spool(self, op: str, payload: Dict[str, Any]) -> Optional[bool]:
         try:
-            self._apply(op, payload)
+            return self._apply(op, payload)
         except Exception as exc:
             logger.error("userdb write %s failed (%s) — spooling to %s", op, exc, self.spool_path)
             self._spool(op, payload)
+            return None
 
     def _spool(self, op: str, payload: Dict[str, Any]) -> None:
         with self._spool_lock:
