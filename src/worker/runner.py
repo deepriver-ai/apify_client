@@ -3,6 +3,28 @@
 Design: docs/db/crawl_tasks.md §5.2 (run status), §6.1 (flow, message shape, worker
 rules), §2.5 (funnel columns), §2.8 R2 (no window → no date filter), §7.3 / §7.4.
 
+Metering (rate_limiting.md §2.1-§2.3, §2.7): every Apify call of a run goes through
+``usage_client.apify.run`` (``UsageMeter`` in ``recording.py``) with the run's org, user
+(``requested_by``) and search (``query_id``), ``event_key='crawl-run:<run_id>'``. When
+admission lets nothing through (``AdmissionRefused``) the run ends as follows:
+
+====================================  ========================  =========================
+refusal                               no Apify call made yet    after a paid call
+====================================  ========================  =========================
+``over_limit`` / ``per_request_cap``  ``blocked`` (terminal;    ``partial`` (money spent,
+                                      the schedule is left      stats + cost kept)
+                                      alone, so the next tick
+                                      retries = deferred)
+``ledger_unreachable``                released to ``queued`` +  ``partial``
+                                      message requeued (retry
+                                      after
+                                      ``CRAWL_WORKER_DB_RETRY_SECS``)
+====================================  ========================  =========================
+
+The ``usage_blocks`` row is written by ``usage_client`` (path ``worker:apify-client``);
+``crawl_runs.error`` / ``stats.usage_refusal`` carry the reason. A message without a
+valid org writes ``usage_blocks(reason='missing_org')`` itself (best effort).
+
 Transport-free: ``handle_message(body, deps)`` returns ``"ack"`` or ``"requeue"`` and the
 consumer (``src/run_crawl_worker.py``) acks accordingly, so this module is unit-testable
 with a fake DB, a fake Apify client and a fake publisher.
@@ -18,13 +40,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
+from usage_client import AdmissionRefused
+
 from src.models.crawl_task import CrawlTask
-from src.worker.recording import CallRecorder, RecordingApifyClient, instrument_actor
+from src.worker.recording import SERVICE, CallRecorder, RecordingApifyClient, UsageMeter, instrument_actor
 
 logger = logging.getLogger(__name__)
 
 ACK = "ack"
 REQUEUE = "requeue"
+# execute_run() result when a ledger outage before any spend released the run to 'queued'.
+RELEASED = "queued"
+BLOCK_PATH = f"worker:{SERVICE}"
 
 MESSAGE_TYPE = "crawl_run"
 
@@ -59,7 +86,7 @@ class WorkerDeps:
     apify_client_factory: Callable[[], Any]            # () -> ApifyClient
     actor_factory: Callable[[str, Any], Any]           # (actor_class, client) -> ApifyActor
     publish: Optional[Callable[[Any], None]] = None    # doc -> None; default publish_document
-    usage_runner_factory: Optional[Callable[[Dict[str, Any]], Callable[[str, Dict[str, Any]], Dict[str, Any]]]] = None
+    usage_ledger: Any = None                           # usage_client Ledger; None = process default (USAGE_DB_URI)
     worker_name: str = "crawl-worker"
     output_dir: str = os.path.join("cache", "runs")
     heartbeat_secs: float = 60.0
@@ -98,11 +125,13 @@ def handle_message(body: Any, deps: WorkerDeps) -> str:
     trace_id = msg.get("trace_id")
     log_ctx = f"run_id={run_id} trace_id={trace_id}"
 
-    # Worker rule (§6.1): no org → ack + error log, never spend. The run is closed
-    # as failed so it doesn't hold the task's one-live-run slot.
+    # Worker rule (§6.1, rate_limiting §2.3): no org → ack + error log +
+    # usage_blocks(missing_org), never spend. The run is closed as failed so it doesn't
+    # hold the task's one-live-run slot.
     if not _valid_org(msg.get("org_id")):
         logger.error("crawl worker: message without a valid org_id (%r) — acked, not run [%s]",
                      msg.get("org_id"), log_ctx)
+        _block_missing_org(deps, msg)
         try:
             deps.db.fail_queued_run(run_id, "message missing org_id (worker:apify-client)")
         except Exception as exc:
@@ -137,12 +166,33 @@ def handle_message(body: Any, deps: WorkerDeps) -> str:
     logger.info("crawl worker: claimed run kind=%s task_id=%s org_id=%s [%s]",
                 run.get("kind"), run.get("task_id"), run.get("org_id"), log_ctx)
     with _heartbeat(deps, run_id):
-        execute_run(run, msg, deps)
+        status = execute_run(run, msg, deps)
     try:
         deps.db.replay_spool()
     except Exception as exc:
         logger.warning("spool replay failed: %s", exc)
+    if status == RELEASED:
+        logger.warning("crawl worker: usage ledger unreachable before any spend — run released, requeue [%s]",
+                       log_ctx)
+        return REQUEUE
     return ACK
+
+
+def _block_missing_org(deps: WorkerDeps, msg: Dict[str, Any]) -> None:
+    """``usage_blocks(path='worker:apify-client', reason='missing_org')``, best effort."""
+    query_id = msg.get("query_id")
+    if isinstance(query_id, bool) or not isinstance(query_id, int) or query_id <= 0:
+        query_id = None
+    kind = msg.get("kind") if isinstance(msg.get("kind"), str) and msg.get("kind") else "crawl"
+    try:
+        ledger = deps.usage_ledger
+        if ledger is None:
+            from usage_client.ledger import get_ledger
+
+            ledger = get_ledger()
+        ledger.block(path=BLOCK_PATH, tool="apify", kind=kind, reason="missing_org", search_id=query_id)
+    except Exception as exc:  # never let the refusal bookkeeping fail the ack
+        logger.error("could not write usage_blocks(missing_org) for run %s: %s", msg.get("run_id"), exc)
 
 
 @contextmanager
@@ -378,9 +428,7 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
         if plan.kwargs.get("max_results") == 0:
             logger.info("run %s: max_items is 0 — nothing to buy", run_id)
         else:
-            usage_runner = deps.usage_runner_factory(run) if deps.usage_runner_factory else None
-            stats["usage_client"] = usage_runner is not None
-            client = RecordingApifyClient(deps.apify_client_factory(), recorder, usage_runner=usage_runner)
+            client = RecordingApifyClient(deps.apify_client_factory(), recorder, _meter_for(run, deps))
             actor = deps.actor_factory(plan.actor_class, client)
             instrument_actor(actor, recorder)
             docs = list(actor.search(plan.search_params, **plan.kwargs) or [])
@@ -400,10 +448,26 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
     except Exception as exc:
         status = "partial" if recorder.calls else "failed"
         error = f"{type(exc).__name__}: {exc}"
-        if isinstance(exc, RunRejected):
-            logger.error("run %s rejected: %s", run_id, exc)
+        if isinstance(exc, (RunRejected, AdmissionRefused)):
+            logger.error("run %s %s: %s", run_id, "rejected" if isinstance(exc, RunRejected) else "refused", exc)
         else:
             logger.exception("run %s %s", run_id, status)
+
+    refusal = recorder.refusal
+    if refusal is not None:
+        # Admission refused a call (the exception may have propagated or been swallowed
+        # by an actor stage): the outcome follows the refusal, see the module docstring.
+        stats["usage_refusal"] = _refusal_stats(recorder)
+        error = (f"AdmissionRefused({refusal.reason}) on a {recorder.refusal_purpose} call: {refusal}"
+                 + (f"; {error}" if error and "AdmissionRefused" not in error else ""))
+        if recorder.calls:
+            status = "partial"
+        elif refusal.reason == "ledger_unreachable":
+            if _release(db, run_id, error):
+                return RELEASED
+            status = "failed"
+        else:
+            status = "blocked"
 
     if plan is not None and plan.comment_posts and docs:
         _record_comment_posts(db, plan.comment_posts, docs)
@@ -419,7 +483,7 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
     logger.info("run %s finished: status=%s items_paid=%s items_new=%s cost_usd=%s error=%s",
                 run_id, status, counters.get("items_paid"), counters.get("items_new"), counters.get("cost_usd"), error)
 
-    if run.get("trigger") == "schedule" and run.get("task_id"):
+    if run.get("trigger") == "schedule" and run.get("task_id") and status != "blocked":
         try:
             db.update_schedule_after_run(run["task_id"], run_id, status == "succeeded")
         except Exception as exc:
@@ -430,6 +494,41 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
         except Exception as exc:
             logger.warning("run %s: comment request close failed: %s", run_id, exc)
     return status
+
+
+def _meter_for(run: Dict[str, Any], deps: WorkerDeps) -> UsageMeter:
+    return UsageMeter(
+        org_id=run.get("org_id"),
+        event_key=f"crawl-run:{run['run_id']}",
+        user_id=run.get("requested_by"),
+        search_id=run.get("query_id"),
+        ledger=deps.usage_ledger,
+    )
+
+
+def _refusal_stats(recorder: CallRecorder) -> Dict[str, Any]:
+    exc = recorder.refusal
+    a = getattr(exc, "admission", None)
+    return {
+        "reason": exc.reason,
+        "kind": exc.kind,
+        "purpose": recorder.refusal_purpose,
+        "asked_usd": getattr(a, "asked_usd", None),
+        "allowed_usd": getattr(a, "allowed_usd", None),
+        "limit_usd": getattr(a, "limit_usd", None),
+        "spent_usd": getattr(a, "spent_usd", None),
+        "remaining_usd": getattr(a, "remaining_usd", None),
+        "limit_id": getattr(a, "limit_id", None),
+    }
+
+
+def _release(db: Any, run_id: int, error: str) -> bool:
+    """``running`` → ``queued`` so the requeued message can claim it again."""
+    try:
+        return bool(db.release_run(run_id, error))
+    except Exception as exc:
+        logger.error("run %s: could not release the run back to queued (%s); failing it", run_id, exc)
+        return False
 
 
 def _publish_all(docs: List[Any], publish: Callable[[Any], None]) -> Tuple[int, int, int, Optional[str]]:

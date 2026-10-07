@@ -21,7 +21,10 @@ Manual ack after the run is finished (prefetch 1); the run executes on a worker 
 so the consuming connection keeps its heartbeats during long actor runs. A message
 whose run is not ``queued`` (redelivery, cancelled) is acked and dropped.
 
-``run_searches.py`` (the xlsx hand path) is unchanged.
+Metering: every Apify call goes through ``usage_client.apify.run`` (admit → cap → run →
+one ``usage_events`` row per Apify run); see ``src/worker/runner.py`` for how an
+admission refusal ends the run. Ledger: ``USAGE_DB_URI`` (default ``DATABASE_URI``),
+spool ``USAGE_SPOOL_DIR`` (default ``cache/usage_spool``).
 """
 from __future__ import annotations
 
@@ -82,39 +85,36 @@ def build_deps():
 
         return ApifyClient(_get_apify_token())
 
-    usage_runner_factory = None
-    if os.getenv("CRAWL_USE_USAGE_CLIENT", "").lower() in ("1", "true", "yes"):
-        usage_runner_factory = _usage_runner_factory
-
     return WorkerDeps(
         db=db,
         apify_client_factory=apify_client_factory,
         actor_factory=lambda actor_class, client: get_actor(actor_class, client=client),
-        usage_runner_factory=usage_runner_factory,
+        usage_ledger=configure_usage_ledger(),
         worker_name=f"{socket.gethostname()}:{os.getpid()}",
         output_dir=os.getenv("CRAWL_WORKER_OUTPUT_DIR", os.path.join("cache", "runs")),
         heartbeat_secs=float(os.getenv("CRAWL_WORKER_HEARTBEAT_SECS", "60")),
     )
 
 
-def _usage_runner_factory(run):
-    """Route each Apify call through ``usage_client.apify.run`` (rate_limiting.md §2.6).
+DEFAULT_USAGE_SPOOL_DIR = os.path.join("cache", "usage_spool")
 
-    One context per delivery (§2.6.1 item 7), keyed by the run so a redelivery
-    reproduces the same ``usage_events.event_id`` sequence.
+
+def configure_usage_ledger():
+    """The process-wide ``usage_client`` ledger (rate_limiting.md §2.2, §2.7).
+
+    ``USAGE_DB_URI`` (default: ``DATABASE_URI`` — the ``crawler`` role holds the usage
+    grants, migration ``2026-10-07_crawler_usage_grants_userdb.sql``); failed
+    ``usage_events`` writes spool to ``USAGE_SPOOL_DIR`` (default ``cache/usage_spool``)
+    and are replayed. Every Apify call is admitted against it, so without a DSN nothing
+    could ever be spent: refuse to start instead.
     """
-    from usage_client import UsageContext
-    from usage_client import apify as usage_apify
+    from usage_client import ledger as usage_ledger
 
-    ctx = UsageContext(
-        org_id=run["org_id"],
-        service="apify-client",
-        kind=run.get("kind") or "crawl",
-        event_key=f"crawl-run:{run['run_id']}",
-        user_id=run.get("requested_by"),
-        search_id=run.get("query_id"),
-    )
-    return lambda actor_id, run_input: usage_apify.run(actor_id, run_input or {}, ctx=ctx)
+    dsn = os.getenv("USAGE_DB_URI") or os.getenv("DATABASE_URI")
+    if not dsn:
+        raise SystemExit("USAGE_DB_URI (or DATABASE_URI) is required: every Apify call is admitted and "
+                         "recorded through usage_client")
+    return usage_ledger.configure(dsn, spool_dir=os.getenv("USAGE_SPOOL_DIR") or DEFAULT_USAGE_SPOOL_DIR)
 
 
 def consume(deps, queue: str, once: bool = False) -> None:

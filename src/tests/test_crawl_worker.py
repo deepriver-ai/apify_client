@@ -1,8 +1,9 @@
 """Crawl-run queue worker (src/worker/*, docs/db/crawl_tasks.md §6.1).
 
-No network: Apify is a fake client (no paid calls), userdb is an in-memory fake, the
-document publisher is a list. The DB-backed counterpart (real SQL as crawler_worker)
-is test_crawl_worker_db.py.
+No network: Apify is a fake client (no paid calls), userdb and the usage_client ledger
+are in-memory fakes, the document publisher is a list. Every Apify call goes through the
+real ``usage_client.apify.run`` (admission + recording against the fake ledger). The
+DB-backed counterpart (real SQL as crawler_worker) is test_crawl_worker_db.py.
 """
 from __future__ import annotations
 
@@ -19,11 +20,16 @@ from src.actors import get_actor
 from src.models.crawl_task import CrawlTask
 from src.worker import runner as runner_mod
 from src.worker.db import CrawlDB
+from usage_client import AdmissionRefused
+from usage_client.context import LedgerUnavailable
+from usage_client.ledger import ANY_TOOL, WINDOWS
+
 from src.worker.recording import (
     CallRecorder,
     CostCapExceeded,
     ItemCapExceeded,
     RecordingApifyClient,
+    UsageMeter,
     instrument_actor,
 )
 from src.worker.runner import ACK, REQUEUE, WorkerDeps, build_crawl_kwargs, diff_params, handle_message
@@ -83,6 +89,62 @@ class FakeApify:
         return _D()
 
 
+class FakeLedger:
+    """usage_client.ledger.Ledger stand-in (the subset admission/apify.run/block use)."""
+
+    def __init__(self, apify_day_usd: Optional[float] = 15.0):
+        self.dsn = "fake://ledger"
+        self.limits: List[dict] = []
+        self.events: Dict[str, Any] = {}
+        self.blocks: List[dict] = []
+        self.down = False
+        if apify_day_usd is not None:  # the seeded default: apify $15/day per org (hard)
+            self.add_limit(limit_usd=apify_day_usd)
+
+    def add_limit(self, *, limit_usd, tool="apify", kind=None, org_id=None, scope="org",
+                  window_kind="day", mode="hard", limit_units=None):
+        self.limits.append(dict(limit_id=len(self.limits) + 1, org_id=org_id, scope=scope, tool=tool, kind=kind,
+                                window_kind=window_kind, limit_usd=float(limit_usd), limit_units=limit_units,
+                                mode=mode, expires_at=None, note=None,
+                                updated_at=datetime(2026, 10, 1, tzinfo=timezone.utc)))
+
+    def spent(self, org_id: int, usd: float, kind: str = "crawl") -> None:
+        from usage_client.ledger import UsageEvent
+
+        eid = f"seed:{len(self.events)}"
+        self.events[eid] = UsageEvent(event_id=eid, org_id=org_id, service="test", tool="apify", kind=kind,
+                                      quantity=1, unit="items", cost_usd=usd)
+
+    def live_limits(self, *, now=None):
+        if self.down:
+            raise LedgerUnavailable("fake ledger down")
+        return [dict(r) for r in self.limits]
+
+    def spend(self, org_id, window, tool=None, kind=None, scope=None, *, now=None):
+        if self.down:
+            raise LedgerUnavailable("fake ledger down")
+        since = (now or datetime.now(timezone.utc)) - WINDOWS[window]
+        return sum(e.cost_usd for e in self.events.values()
+                   if e.timestamp > since and (org_id is None or e.org_id == org_id)
+                   and (tool in (None, ANY_TOOL) or e.tool == tool)
+                   and (kind is None or e.kind == kind) and (scope is None or e.scope == scope))
+
+    def block(self, **kw):
+        self.blocks.append(kw)
+        return True
+
+    def record(self, event, conn=None):
+        self.events.setdefault(event.event_id, event)
+        return True
+
+    def recorded(self) -> List[Any]:
+        return [e for k, e in self.events.items() if not k.startswith("seed:")]
+
+
+def _meter(ledger=None, org_id=106, run_id=1234) -> UsageMeter:
+    return UsageMeter(org_id=org_id, event_key=f"crawl-run:{run_id}", ledger=ledger or FakeLedger())
+
+
 class FakeDB:
     """In-memory userdb with the CrawlDB interface."""
 
@@ -112,6 +174,13 @@ class FakeDB:
 
     def get_run(self, run_id):
         return self.runs.get(run_id)
+
+    def release_run(self, run_id, error):
+        run = self.runs.get(run_id)
+        if run and run["status"] == "running":
+            run.update(status="queued", error=error, worker=None)
+            return 1
+        return 0
 
     def fail_queued_run(self, run_id, error):
         run = self.runs.get(run_id)
@@ -229,6 +298,7 @@ def world(tmp_path, sample_facebook_posts_results, sample_facebook_comments):
         apify_client_factory=lambda: apify,
         actor_factory=lambda actor_class, client: get_actor(actor_class, client=client),
         publish=published.append,
+        usage_ledger=FakeLedger(),
         worker_name="test-worker",
         output_dir=str(tmp_path / "runs"),
         heartbeat_secs=0.01,
@@ -502,6 +572,228 @@ class TestRunExecution:
         assert db.fetched[1] > 0 and len(published) == 1
 
 
+# --------------------------------------------------------------------------- usage metering
+
+
+class TestUsageMetering:
+    """Every Apify call goes through usage_client.apify.run (rate_limiting.md §2.7)."""
+
+    def test_missing_org_writes_usage_block(self, world):
+        db, apify, deps, _ = world
+        assert handle_message(json.dumps(_message(org_id=0, query_id=228, kind="crawl")), deps) == ACK
+        assert apify.calls == []
+        assert deps.usage_ledger.blocks == [{"path": "worker:apify-client", "tool": "apify", "kind": "crawl",
+                                             "reason": "missing_org", "search_id": 228}]
+        assert db.runs[1234]["status"] == "failed"
+
+    def test_missing_org_block_is_best_effort(self, world):
+        db, apify, deps, _ = world
+
+        def broken(**kw):
+            raise RuntimeError("ledger exploded")
+
+        deps.usage_ledger.block = broken
+        assert handle_message(json.dumps(_message(org_id=None, kind="comments")), deps) == ACK
+        assert db.runs[1234]["status"] == "failed"
+
+    def test_one_usage_event_per_apify_run_linked_from_crawl_run_calls(self, world):
+        db, apify, deps, _ = world
+        db.tasks[159]["get_comments"] = True
+        db.runs[1234].update(query_id=228, requested_by=23)
+        with _no_es():
+            handle_message(json.dumps(_message(query_id=228)), deps)
+        assert db.runs[1234]["status"] == "succeeded", db.runs[1234].get("error")
+        events = deps.usage_ledger.recorded()
+        assert len(events) == len(apify.calls) == len(db.calls) == 2
+        by_id = {e.event_id: e for e in events}
+        for call in db.calls.values():
+            ev = by_id[call["usage_event_id"]]  # crawl_run_calls.usage_event_id -> usage_events
+            kind = {"search": "crawl", "comments": "comments"}[call["purpose"]]
+            assert ev.event_id == f"apify-client:crawl-run:1234:106:{kind}:{call['apify_run_id']}"
+            assert (ev.org_id, ev.user_id, ev.search_id, ev.scope) == (106, 23, 228, "org")
+            assert (ev.service, ev.tool, ev.kind, ev.unit) == ("apify-client", "apify", kind, "items")
+            assert ev.cost_usd == call["cost_usd"] == 0.01 and ev.estimated is False
+            assert ev.quantity == call["items"]
+            assert ev.raw["run_id"] == call["apify_run_id"]
+        # crawl_runs cost stays the sum of the calls, as before
+        assert db.runs[1234]["cost_usd"] == pytest.approx(0.02)
+
+    def test_redelivered_record_is_one_row(self, world):
+        """A replay of the same Apify run maps to the same event id (no double count)."""
+        db, apify, deps, _ = world
+        with _no_es():
+            handle_message(json.dumps(_message()), deps)
+        (ev,) = deps.usage_ledger.recorded()
+        deps.usage_ledger.record(ev)
+        assert len(deps.usage_ledger.recorded()) == 1
+
+    def test_run_caps_reach_apify(self, world):
+        """The run's own caps (max_items, admitted_usd / task max_cost_usd_per_run / message
+        max_cost_usd) are passed through usage_client to Apify."""
+        db, apify, deps, _ = world
+        db.runs[1234].update(max_items=20, admitted_usd=0.06)
+        db.tasks[159]["max_cost_usd_per_run"] = 0.5
+        with _no_es():
+            handle_message(json.dumps(_message(max_items=20, max_cost_usd=0.20)), deps)
+        assert db.runs[1234]["status"] == "succeeded", db.runs[1234].get("error")
+        kw = apify.calls[0]["kwargs"]
+        # min(search budget 20, floor(0.06 / 0.004) = 15) items, charge capped to the admitted 15 x 0.004
+        assert kw["max_items"] == 15
+        assert float(kw["max_total_charge_usd"]) == pytest.approx(0.06)
+        (ev,) = deps.usage_ledger.recorded()
+        assert ev.raw["max_items"] == 15 and ev.raw["max_total_charge_usd"] == pytest.approx(0.06)
+
+    def test_org_budget_caps_the_call(self, world):
+        """Partial admission: the org has $0.02 left today → 5 crawl items."""
+        db, apify, deps, _ = world
+        deps.usage_ledger.spent(106, 14.98)
+        with _no_es():
+            handle_message(json.dumps(_message()), deps)
+        assert db.runs[1234]["status"] == "succeeded", db.runs[1234].get("error")
+        assert apify.calls[0]["kwargs"]["max_items"] == 5
+        assert float(apify.calls[0]["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.02)
+
+    def test_over_limit_before_any_call_blocks_the_run(self, world):
+        db, apify, deps, _ = world
+        db.runs[1234]["trigger"] = "schedule"
+        deps.usage_ledger.spent(106, 15.0)
+        with _no_es():
+            assert handle_message(json.dumps(_message()), deps) == ACK
+        run = db.runs[1234]
+        assert apify.calls == [] and db.calls == {}
+        assert run["status"] == "blocked"
+        assert "AdmissionRefused(over_limit)" in run["error"]
+        assert run["stats"]["usage_refusal"]["reason"] == "over_limit"
+        assert run["stats"]["usage_refusal"]["kind"] == "crawl"
+        assert run["cost_usd"] == 0
+        (block,) = deps.usage_ledger.blocks
+        assert block["path"] == "worker:apify-client" and block["reason"] == "over_limit"
+        assert block["org_id"] == 106 and block["kind"] == "crawl"
+        assert db.schedule_updates == []   # not a task failure: the next tick tries again
+
+    def test_over_limit_after_a_paid_call_is_partial(self, world):
+        """Search admitted, the comments call refused (a $0 comments row): money already
+        spent → partial, cost kept, one block row."""
+        db, apify, deps, _ = world
+        db.tasks[159]["get_comments"] = True
+        deps.usage_ledger.add_limit(limit_usd=0.0, kind="comments")
+        with _no_es():
+            assert handle_message(json.dumps(_message()), deps) == ACK
+        run = db.runs[1234]
+        assert run["status"] == "partial"
+        assert "AdmissionRefused(over_limit) on a comments call" in run["error"]
+        assert [c["purpose"] for c in db.calls.values()] == ["search"]
+        assert run["cost_usd"] == pytest.approx(0.01)
+        assert len(deps.usage_ledger.recorded()) == 1
+        assert [b["reason"] for b in deps.usage_ledger.blocks] == ["over_limit"]
+
+    def test_ledger_unreachable_before_any_call_releases_and_requeues(self, world):
+        db, apify, deps, _ = world
+        deps.usage_ledger.down = True
+        with _no_es():
+            assert handle_message(json.dumps(_message()), deps) == REQUEUE
+        assert apify.calls == []
+        assert db.runs[1234]["status"] == "queued"
+        assert "ledger_unreachable" in db.runs[1234]["error"]
+        assert deps.usage_ledger.blocks[0]["reason"] == "ledger_unreachable"
+        # the ledger is back: the redelivered message runs normally
+        deps.usage_ledger.down = False
+        with _no_es():
+            assert handle_message(json.dumps(_message()), deps) == ACK
+        assert db.runs[1234]["status"] == "succeeded"
+        assert len(deps.usage_ledger.recorded()) == 1
+
+    def test_ledger_unreachable_and_release_failing_fails_the_run(self, world):
+        db, apify, deps, _ = world
+        deps.usage_ledger.down = True
+
+        def release_down(run_id, error):
+            raise ConnectionError("userdb down")
+
+        db.release_run = release_down
+        with _no_es():
+            assert handle_message(json.dumps(_message()), deps) == ACK
+        assert db.runs[1234]["status"] == "failed" and "ledger_unreachable" in db.runs[1234]["error"]
+        assert apify.calls == []
+
+    def test_ledger_unreachable_after_a_paid_call_is_partial(self, world):
+        db, apify, deps, _ = world
+        db.tasks[159]["get_comments"] = True
+        real_call = apify.actor
+
+        def actor_then_down(actor_id):
+            a = real_call(actor_id)
+            orig = a.call
+
+            def call(**kw):
+                out = orig(**kw)
+                deps.usage_ledger.down = True  # the ledger drops after the search call
+                return out
+
+            a.call = call
+            return a
+
+        apify.actor = actor_then_down
+        with _no_es():
+            assert handle_message(json.dumps(_message()), deps) == ACK
+        assert db.runs[1234]["status"] == "partial"
+        assert "ledger_unreachable" in db.runs[1234]["error"]
+        assert len(apify.calls) == 1
+
+    def test_comments_run_meters_as_comments(self, world, sample_facebook_comments):
+        db, apify, deps, _ = world
+        url = sample_facebook_comments[0].get("postUrl") or sample_facebook_comments[0].get("facebookUrl")
+        db.runs[77] = _run_row(run_id=77, kind="comments", task_id=None, comment_request_id=5, max_items=15)
+        db.comment_posts = [{"row_id": 1, "request_id": 5, "post_url": url, "tier": "deep", "depth": 50,
+                             "stored_comments": 0, "run_id": 77}]
+        handle_message(json.dumps(_message(run_id=77, kind="comments", task_id=None, comment_request_id=5)), deps)
+        assert db.runs[77]["status"] == "succeeded", db.runs[77].get("error")
+        (ev,) = deps.usage_ledger.recorded()
+        assert ev.kind == "comments" and ev.event_id.startswith("apify-client:crawl-run:77:106:comments:")
+        # message max_cost_usd 0.20 → floor(0.20 / 0.002) = 100 comment items
+        assert apify.calls[0]["kwargs"]["max_items"] == 100
+
+    def test_refused_run_never_asks_again(self):
+        """After a refusal the client refuses locally: one block row, no Apify call."""
+        ledger = FakeLedger()
+        ledger.spent(106, 15.0)
+        rec = CallRecorder()
+        fake = FakeApify({"a/b": [{}]})
+        client = RecordingApifyClient(fake, rec, _meter(ledger))
+        for _ in range(3):
+            with pytest.raises(AdmissionRefused):
+                client.actor("a/b").call(run_input={})
+        assert fake.calls == [] and len(ledger.blocks) == 1
+        assert rec.refusal.reason == "over_limit" and rec.refusal_purpose == "search"
+
+    def test_actor_kwargs_and_caps_are_forwarded(self):
+        rec = CallRecorder(search_item_budget=7)
+        fake = FakeApify({"a/b": [{}]})
+        RecordingApifyClient(fake, rec, _meter()).actor("a/b").call(
+            run_input={"q": 1, "maxItems": 50}, memory_mbytes=256, timeout_secs=60, max_items=9)
+        call = fake.calls[0]
+        assert call["kwargs"]["memory_mbytes"] == 256 and call["kwargs"]["timeout_secs"] == 60
+        assert call["kwargs"]["max_items"] == 7          # min(caller 9, run budget 7)
+        assert call["run_input"] == {"q": 1, "maxItems": 7}
+
+    def test_profiles_calls_meter_as_profiles(self):
+        ledger = FakeLedger()
+        rec = CallRecorder()
+        fake = FakeApify({"a/b": [{}]})
+        rec.push("profiles")
+        RecordingApifyClient(fake, rec, _meter(ledger)).actor("a/b").call(run_input={})
+        (ev,) = ledger.recorded()
+        assert ev.kind == "profiles" and rec.calls[0].usage_event_id == ev.event_id
+
+    def test_budget_below_one_item_stops_without_asking(self):
+        ledger = FakeLedger()
+        rec = CallRecorder(cost_budget_usd=0.003)
+        fake = FakeApify({"a/b": [{}]})
+        with pytest.raises(CostCapExceeded):
+            RecordingApifyClient(fake, rec, _meter(ledger)).actor("a/b").call(run_input={})
+        assert fake.calls == [] and ledger.blocks == []
+
+
 # --------------------------------------------------------------------------- params & caps
 
 
@@ -551,7 +843,7 @@ class TestKwargs:
         """The Apify input carries no date key when the task has no window."""
         rec = CallRecorder()
         fake = FakeApify({"scrapeforge/facebook-search-posts": []})
-        actor = get_actor("facebook_keyword_search", client=RecordingApifyClient(fake, rec))
+        actor = get_actor("facebook_keyword_search", client=RecordingApifyClient(fake, rec, _meter()))
         task = self._task(actor_class="facebook_keyword_search", search_params=["pinal de amoles"], actor_params={})
         kwargs, _ = build_crawl_kwargs(task, _run_row())
         actor.search(task.search_params, **kwargs)
@@ -584,7 +876,7 @@ class TestRecordingClient:
     def test_search_calls_get_apify_max_items_and_budget(self, sample_facebook_posts_results):
         rec = CallRecorder(search_item_budget=3)
         fake = FakeApify({"a/b": sample_facebook_posts_results})
-        client = RecordingApifyClient(fake, rec)
+        client = RecordingApifyClient(fake, rec, _meter())
         client.actor("a/b").call(run_input={})
         assert fake.calls[0]["kwargs"]["max_items"] == 3
         assert rec.calls[0].items == 3
@@ -592,38 +884,28 @@ class TestRecordingClient:
             client.actor("a/b").call(run_input={})
         assert len(fake.calls) == 1
 
-    def test_enrichment_calls_not_item_capped(self):
+    def test_enrichment_calls_not_capped_by_the_search_budget(self):
+        """The run's search-item budget doesn't apply to enrichment calls; usage_client
+        still caps them (DEFAULT_MAX_ITEMS when nothing tighter is known)."""
         rec = CallRecorder(search_item_budget=0)
         fake = FakeApify({"a/b": [{}]})
         rec.push("comments")
-        RecordingApifyClient(fake, rec).actor("a/b").call(run_input={})
-        assert "max_items" not in fake.calls[0]["kwargs"]
+        RecordingApifyClient(fake, rec, _meter()).actor("a/b").call(run_input={})
+        assert fake.calls[0]["kwargs"]["max_items"] == 1000
 
     def test_cost_budget(self):
         rec = CallRecorder(cost_budget_usd=0.015)
         fake = FakeApify({"a/b": [{}]}, cost_per_call=0.01)
-        client = RecordingApifyClient(fake, rec)
+        client = RecordingApifyClient(fake, rec, _meter())
         client.actor("a/b").call(run_input={})
-        assert float(fake.calls[0]["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.015)
+        # usage_client asks for floor(0.015 / 0.004) = 3 crawl items and caps the charge to
+        # what admission granted for them (3 x 0.004).
+        assert fake.calls[0]["kwargs"]["max_items"] == 3
+        assert float(fake.calls[0]["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.012)
         client.actor("a/b").call(run_input={})
+        assert fake.calls[1]["kwargs"]["max_items"] == 1  # 0.005 left
         with pytest.raises(CostCapExceeded):
             client.actor("a/b").call(run_input={})
-
-    def test_usage_runner_replaces_raw_call(self):
-        rec = CallRecorder()
-        fake = FakeApify({})
-        fake.datasets["ds-u"] = [{}, {}]
-        seen = []
-
-        def runner(actor_id, run_input):
-            seen.append((actor_id, run_input))
-            return {"id": "u-1", "status": "SUCCEEDED", "defaultDatasetId": "ds-u", "usageTotalUsd": 0.5,
-                    "usage_event_id": "apify-client:u-1:106:crawl:0"}
-
-        RecordingApifyClient(fake, rec, usage_runner=runner).actor("a/b").call(run_input={"q": 1})
-        assert seen == [("a/b", {"q": 1})] and fake.calls == []
-        assert rec.calls[0].cost_usd == 0.5 and rec.calls[0].items == 2
-        assert rec.calls[0].usage_event_id == "apify-client:u-1:106:crawl:0"
 
     def test_missing_usage_is_reread_once(self):
         rec = CallRecorder()
@@ -637,7 +919,7 @@ class TestRecordingClient:
                 return _R()
 
         fake = F({"a/b": []}, cost_per_call=None)
-        RecordingApifyClient(fake, rec).actor("a/b").call(run_input={})
+        RecordingApifyClient(fake, rec, _meter()).actor("a/b").call(run_input={})
         assert rec.calls[0].cost_usd == pytest.approx(0.042)
 
     def test_instrument_actor_tags_stage_calls(self):

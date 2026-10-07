@@ -4,7 +4,9 @@ Short-lived connections, one per operation: a run can sit inside Apify for many
 minutes, and the role has 60 s statement / idle-in-transaction timeouts, so nothing
 holds a connection across actor work. Every statement here is within the role's grants:
 SELECT crawl_*; INSERT/UPDATE crawl_runs; INSERT crawl_run_calls; column UPDATEs on
-crawl_schedules / crawl_comment_requests / crawl_comment_request_posts.
+crawl_schedules / crawl_comment_requests / crawl_comment_request_posts. The usage ledger
+(``usage_events`` / ``usage_blocks`` / ``usage_limits``) is written and read by
+``usage_client`` on its own connection (``USAGE_DB_URI``, default ``DATABASE_URI``).
 
 Cost writes (``crawl_run_calls`` inserts and the final ``crawl_runs`` stats/cost update)
 never fail a run: on a DB error they go to a JSONL spool and are replayed later
@@ -104,6 +106,16 @@ class CrawlDB:
         return self._execute(
             """UPDATE public.crawl_runs SET status = 'failed', finished_at = now(), error = %s
                 WHERE run_id = %s AND status = 'queued'""",
+            (error, run_id),
+        )
+
+    def release_run(self, run_id: int, error: str) -> int:
+        """``running`` → ``queued`` (usage ledger unreachable before any Apify spend): the
+        requeued message claims it again. ``error`` keeps the last reason visible."""
+        return self._execute(
+            """UPDATE public.crawl_runs
+                  SET status = 'queued', started_at = NULL, heartbeat_at = NULL, worker = NULL, error = %s
+                WHERE run_id = %s AND status = 'running'""",
             (error, run_id),
         )
 

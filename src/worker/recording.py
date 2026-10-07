@@ -11,11 +11,19 @@ through ``client.actor(id).call(run_input=...)``. The worker hands each actor a
   cost is persisted before anything else can fail (§5.2 ``partial``);
 - calls are tagged with a ``purpose`` (search / profiles / comments / video / other) from
   the pipeline stage they run in (``instrument_actor``);
-- paid search items are capped server-side with Apify's ``max_items`` (pay-per-result
-  actors) to the run's remaining item budget, and every call carries
-  ``max_total_charge_usd`` for the remaining cost budget when the run has one;
-- with ``usage_client`` enabled, the call goes through ``usage_client.apify.run(actor,
-  input, ctx=ctx)`` (rate_limiting.md §2.6) instead of the raw client.
+- **every call goes through ``usage_client.apify.run``** (rate_limiting.md §2.6-§2.7,
+  via ``UsageMeter``): it admits the call against the org's ``usage_limits``, caps Apify
+  ``max_items`` / ``max_total_charge_usd`` to what was admitted, runs it and records one
+  ``usage_events`` row per Apify run; the returned ``usage_event_id`` lands in
+  ``crawl_run_calls.usage_event_id``;
+- the run's own caps are passed to it on every call: search calls get ``max_items`` =
+  the run's remaining paid-item budget, every call gets ``max_total_charge_usd`` = the
+  remaining cost budget when the run has one (the smaller of these and the admission
+  wins);
+- an ``AdmissionRefused`` (nothing admitted) is kept on the recorder (``refusal``) and
+  re-raised; later calls of the same run are refused without asking the ledger again,
+  so an actor that swallows the error per stage can't spend past the refusal and the
+  worker sees it even then.
 """
 from __future__ import annotations
 
@@ -23,8 +31,9 @@ import functools
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
+
+from usage_client import AdmissionRefused, UsageContext
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +46,15 @@ STAGE_PURPOSE = {
     "_enrich_content": "other",      # attached-URL fetch is not Apify; video downloads are
     "_download_video": "video",
 }
+
+SERVICE = "apify-client"
+# crawl_run_calls.purpose -> usage_tools kind (tool 'apify'). Video downloads and other
+# utility calls are crawl spend (no kind of their own in usage_tools).
+PURPOSE_KIND = {"search": "crawl", "comments": "comments", "profiles": "profiles"}
+
+
+def kind_for(purpose: str) -> str:
+    return PURPOSE_KIND.get(purpose, "crawl")
 
 
 class CostCapExceeded(RuntimeError):
@@ -94,6 +112,8 @@ class CallRecorder:
     cost_budget_usd: Optional[float] = None
     default_purpose: str = "search"
     calls: List[CallRecord] = field(default_factory=list)
+    refusal: Optional[AdmissionRefused] = None   # first AdmissionRefused of the run
+    refusal_purpose: Optional[str] = None
     _purpose_stack: List[str] = field(default_factory=list)
 
     @property
@@ -151,6 +171,55 @@ def _parse_ts(value: Any) -> Optional[datetime]:
         return None
 
 
+class UsageMeter:
+    """Meters one unit of work (a crawl run, a hand-run task) through ``usage_client.apify.run``.
+
+    One ``UsageContext`` per usage kind (crawl / comments / profiles), built lazily and
+    reused for the whole run, all with the same ``event_key``. The ``usage_events.event_id``
+    is ``apify-client:<event_key>:<org_id>:<kind>:<Apify run id>``, so every paid Apify run
+    gets its own row and a replayed record of the same run is a no-op.
+
+    ``ledger``: a ``usage_client.ledger.Ledger`` (None = the process default, configured
+    from ``USAGE_DB_URI``). ``scope``: ``org`` (customer work) or ``global`` (platform org).
+    """
+
+    def __init__(self, *, org_id: Any, event_key: str, user_id: Optional[int] = None,
+                 search_id: Optional[int] = None, scope: str = "org", ledger: Any = None,
+                 service: str = SERVICE):
+        self.org_id = org_id
+        self.event_key = event_key
+        self.user_id = user_id
+        self.search_id = search_id
+        self.scope = scope
+        self.ledger = ledger
+        self.service = service
+        self._contexts: Dict[str, UsageContext] = {}
+
+    def context(self, kind: str) -> UsageContext:
+        """Raises ``usage_client.MissingOrg`` for a missing / non-positive org (no spend)."""
+        if kind not in self._contexts:
+            self._contexts[kind] = UsageContext(
+                org_id=self.org_id, service=self.service, kind=kind, event_key=self.event_key,
+                user_id=self.user_id, search_id=self.search_id, scope=self.scope,
+            )
+        return self._contexts[kind]
+
+    def run(self, client: Any, actor_id: str, run_input: Any, *, purpose: str,
+            max_items: Optional[int] = None, max_total_charge_usd: Any = None,
+            **call_kwargs: Any) -> Optional[Dict[str, Any]]:
+        from usage_client import apify as usage_apify
+
+        return usage_apify.run(
+            actor_id, run_input,
+            ctx=self.context(kind_for(purpose)),
+            max_items=max_items,
+            max_total_charge_usd=max_total_charge_usd,
+            client=client,
+            ledger=self.ledger,
+            **call_kwargs,
+        )
+
+
 class _RecordingActorClient:
     def __init__(self, owner: "RecordingApifyClient", actor_id: str):
         self._owner = owner
@@ -166,15 +235,10 @@ class _RecordingActorClient:
 class RecordingApifyClient:
     """Drop-in for ``ApifyClient`` as used by the actors (``actor(id).call``, ``dataset``)."""
 
-    def __init__(
-        self,
-        client: Any,
-        recorder: CallRecorder,
-        usage_runner: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
-    ):
+    def __init__(self, client: Any, recorder: CallRecorder, meter: UsageMeter):
         self._client = client
         self._recorder = recorder
-        self._usage_runner = usage_runner
+        self._meter = meter
 
     def actor(self, actor_id: str) -> _RecordingActorClient:
         return _RecordingActorClient(self, actor_id)
@@ -190,6 +254,10 @@ class RecordingApifyClient:
         rec = self._recorder
         purpose = rec.purpose
 
+        if rec.refusal is not None:
+            # Admission already let nothing through for this run: don't ask again (one
+            # usage_blocks row per refusal), don't spend.
+            raise rec.refusal
         remaining_cost = rec.remaining_cost()
         if remaining_cost is not None and remaining_cost <= 0:
             raise CostCapExceeded(
@@ -205,19 +273,35 @@ class RecordingApifyClient:
         else:
             remaining_items = None
 
+        # The run's own caps; usage_client lowers them further to what admission allows.
+        call_kwargs = dict(kwargs)
+        max_items = call_kwargs.pop("max_items", None)
+        if remaining_items is not None:
+            max_items = remaining_items if max_items is None else min(int(max_items), remaining_items)
+        max_charge = call_kwargs.pop("max_total_charge_usd", None)
+        if remaining_cost is not None:
+            capped = round(remaining_cost, 6)
+            max_charge = capped if max_charge is None else min(float(max_charge), capped)
+        if max_charge is not None:
+            from usage_client import prices
+
+            unit = prices.estimate("apify", kind_for(purpose), 1)
+            if float(max_charge) < unit:
+                # Less than one item's list price left: usage_client would ask for 0 items.
+                raise CostCapExceeded(
+                    f"run cost budget left ({float(max_charge):.6f} USD) is below one {kind_for(purpose)} item "
+                    f"({unit} USD); skipping {purpose} call to {actor_id}"
+                )
+
         started = _now()
-        if self._usage_runner is not None:
-            # usage_client caps maxItems to the org's remaining budget and records the
-            # usage_events row itself (rate_limiting.md §2.6/§2.7).
-            run = self._usage_runner(actor_id, run_input)
-        else:
-            call_kwargs = dict(kwargs)
-            if remaining_items is not None:
-                prior = call_kwargs.get("max_items")
-                call_kwargs["max_items"] = remaining_items if prior is None else min(prior, remaining_items)
-            if remaining_cost is not None:
-                call_kwargs.setdefault("max_total_charge_usd", Decimal(str(round(remaining_cost, 6))))
-            run = self._client.actor(actor_id).call(run_input=run_input, **call_kwargs)
+        try:
+            run = self._meter.run(self._client, actor_id, run_input, purpose=purpose,
+                                  max_items=max_items, max_total_charge_usd=max_charge, **call_kwargs)
+        except AdmissionRefused as exc:
+            rec.refusal, rec.refusal_purpose = exc, purpose
+            logger.error("apify call refused by admission: purpose=%s actor=%s reason=%s (%s)",
+                         purpose, actor_id, exc.reason, exc)
+            raise
         finished = _now()
 
         if not run:
@@ -235,7 +319,7 @@ class RecordingApifyClient:
             cost_usd=_to_float(run.get("usageTotalUsd")),
             estimated=False,
             usage=run.get("usage"),
-            usage_event_id=run.get("usage_event_id") or run.get("usageEventId"),
+            usage_event_id=run.get("usage_event_id"),
             started_at=_parse_ts(run.get("startedAt")) or started,
             finished_at=_parse_ts(run.get("finishedAt")) or finished,
         )
