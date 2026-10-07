@@ -186,8 +186,8 @@ scrapes and video downloads.
 | Column | Type | Notes |
 |---|---|---|
 | `run_id` | `bigint` identity PK | |
-| `kind` | `text NOT NULL` CHECK `crawl`/`comments` | |
-| `task_id` | FK `crawl_tasks NULL` | set when `kind='crawl'` |
+| `kind` | `text NOT NULL` CHECK `crawl`/`comments`/`adhoc` | `adhoc` (§6.4) pending migration `2026-10-07_crawl_runs_adhoc_userdb.sql` |
+| `task_id` | FK `crawl_tasks NULL` | set when `kind='crawl'`; NULL for `comments` and `adhoc` |
 | `comment_request_id` | FK `crawl_comment_requests NULL` | set when `kind='comments'`. A CHECK ties each kind to its FK |
 | `org_id` | `integer NOT NULL` FK `orgs` | attribution (`rate_limiting.md` §2.3) |
 | `query_id` | FK `user_searches NULL ON DELETE SET NULL` | → `usage_events.search_id` |
@@ -669,6 +669,56 @@ Then `max_items = clamp(r × every × (1 + margin), cap_floor, crawl_tasks.max_r
 nudged down while `overlap_rate > target_overlap_rate`. The first run is a probe at
 `cap_floor` (agent_framework §5.1). Spikes are non-stationary: the circuit breakers
 (§7.4) own the tail, not the learner.
+
+### 6.4 Ad-hoc runs (Oscar, 2026-10-06; branch `crawl-adhoc` in media-backend-paid + apify_client)
+
+Launch a crawl on demand **without a `crawl_tasks` row** — a one-off probe, a customer's
+"just look this up once" — with the same money controls as a task run.
+
+- **Request.** `POST /crawl/runs/request` takes an inline `task` spec instead of `task_id`
+  (exactly one). The spec is the writable task columns, validated with the same rules as
+  `/crawl/tasks/create`: actor in `crawl_actor_classes` (crawl kind, enabled), `params_schema`,
+  reserved `actor_params` keys and cap-lifting `apify_input` keys refused, `max_results` ≤ 1000,
+  `min_date` XOR `period` or neither (neither = no date filter, §2.8 R2), `search_params`
+  sorted. Org from the JWT only; `trigger` is `api` only (no schedule without a task).
+- **Admission.** The same path as task runs, not a fork: estimate (cold — no history) →
+  `admit_api(tool='apify', kind='crawl', path='api:/crawl/runs/request')` → 429 / 503 with a
+  `blocked` row, partial admission scales `max_items`.
+- **Row.** A `crawl_runs` row is still written (audit, cost, funnel): `kind = 'adhoc'`,
+  `task_id` NULL, `comment_request_id` NULL, `params` = the usual `to_actor_kwargs()`
+  snapshot **plus `params.spec`**, the complete canonical spec (every writable column with
+  defaults, `min_date` as UTC ISO). The DB row is the source of truth.
+- **Message.** The §6.1 shape unchanged: `kind: "adhoc"`, `task_id: null`, `params` = the
+  row's `params`; `max_cost_usd` = the spec's `max_cost_usd_per_run`.
+- **Worker.** `plan_run` builds the task with `CrawlTask.from_spec(run.params.spec)`, which
+  shares `from_db_row`'s column mapping and `to_actor_kwargs()` (no second param path); from
+  there it is a crawl run (actor checks, validation, window = `window_since`, budgets, metering
+  as `crawl`, funnel, `crawl_run_calls`, `usage_events`). No schedule bookkeeping.
+- **Filter-cache key.** `adhoc:<sha1>` of the canonical spec without the fields that change no
+  filter decision (`name`, `metadata`, `max_cost_usd_per_run`, `max_results`, `publish`),
+  JSON with sorted keys and compact separators. Repeating the same ad-hoc crawl — bigger or
+  smaller — reuses its cached drops; any filter change starts a new scope. Backend
+  (`crawl_helpers.adhoc_cache_key`) and worker (`crawl_task.adhoc_cache_key`) both compute
+  it; a shared test vector pins them together.
+- **Live runs.** `crawl_runs_one_live_per_task` only covers task runs; identical ad-hoc
+  requests each get a run (each is admitted and paid).
+- **Save as task.** `POST /crawl/tasks/create` (and `propose`) take `from_run_id`: the ad-hoc
+  run's spec, the body's fields on top (a body window replaces the spec's), validated like any
+  create, `metadata.from_run_id` set. No new endpoint, so no RBAC rows. The task's cache key
+  is `db:<task_id>` (the ad-hoc cached drops are not carried over).
+- **Schema.** `media-backend-paid/docs/db/migrations/2026-10-07_crawl_runs_adhoc_userdb.sql`
+  (draft, not applied to stg): `crawl_runs_kind_chk` gains `adhoc`; `crawl_runs_kind_ref_chk`
+  requires `task_id IS NULL AND comment_request_id IS NULL` for it. The one-live-run index
+  (`task_id IS NOT NULL`) and the `crawl_runs_same_org` trigger (every check guarded by `IS NOT
+  NULL`; a `query_id` is still checked) need no change; the backend / `crawler_worker` grants
+  already cover the new kind. The poller's reaper covers every kind; its settle pass only reads
+  `kind = 'crawl'` scheduled runs.
+- **Tests.** Backend unit (spec canonicalization, key vector) and DB endpoint tests; worker unit
+  (`TestFromSpec`, `TestAdhocRuns`) and DB tests (as `crawler_worker`); a local e2e (backend →
+  local rabbit_enqueuer → `document_processing_dev`/`dev_crawl_runs` → worker with Apify
+  mocked, dry runs, real usage ledger): ad-hoc run `succeeded` with cost and funnel, the same
+  spec again reusing the cached drop, a refused ad-hoc request (429, `blocked`, nothing
+  enqueued), and "save as task" followed by a run of the promoted task.
 
 ---
 

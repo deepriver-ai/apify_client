@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import openpyxl
@@ -11,6 +12,42 @@ import openpyxl
 from dateutil import parser as dateutil_parser
 
 logger = logging.getLogger(__name__)
+
+# Ad-hoc runs (docs/db/crawl_tasks.md §6.4): fields of a stored spec that change no filter
+# decision (volume, cost, publishing, notes) stay out of the filter-cache key. Must match
+# media-backend-paid backend/app/crawl/crawl_helpers.py (SPEC_KEY_EXCLUDED, adhoc_cache_key);
+# both test suites pin the same vector.
+SPEC_KEY_EXCLUDED = frozenset({"name", "metadata", "max_cost_usd_per_run", "max_results", "publish"})
+ADHOC_KEY_PREFIX = "adhoc:"
+# The writable crawl_tasks columns a spec carries (crawl_runs.params.spec); anything else is refused.
+SPEC_FIELDS = frozenset({
+    "name", "actor_class", "search_params", "country_id", "language", "max_results", "min_date", "period",
+    "publish", "get_comments", "max_comments", "not_keywords", "llm_filter_condition", "update_existing",
+    "enrich_followers", "fetch_attached_url", "classify_users", "official_page", "actor_params",
+    "max_cost_usd_per_run", "metadata",
+})
+
+
+def _spec_min_date_iso(value: Any) -> Any:
+    """``min_date`` as the backend stores it in a spec: ISO 8601 in UTC (naive = UTC)."""
+    if value is None:
+        return None
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def adhoc_cache_key(spec: Dict[str, Any]) -> str:
+    """``adhoc:<sha1>`` of the canonical spec minus ``SPEC_KEY_EXCLUDED`` (search_params
+    sorted, ``min_date`` as UTC ISO; json sort_keys, compact separators, UTF-8)."""
+    keyed = {k: v for k, v in spec.items() if k not in SPEC_KEY_EXCLUDED}
+    if isinstance(keyed.get("search_params"), list):
+        keyed["search_params"] = sorted({str(p).strip() for p in keyed["search_params"] if str(p).strip()})
+    if "min_date" in keyed:
+        keyed["min_date"] = _spec_min_date_iso(keyed["min_date"])
+    blob = json.dumps(keyed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return ADHOC_KEY_PREFIX + hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -125,23 +162,54 @@ class CrawlTask:
         is a run option, not a task column, so it defaults to False here. ``enabled``
         mirrors ``status == 'active'``; the worker runs whatever run row it is handed.
         """
+        legacy = row.get("legacy_task_id")
+        return cls._from_columns(row, str(legacy) if legacy else f"db:{row['task_id']}",
+                                 f"crawl task {row.get('task_id')}")
+
+    @classmethod
+    def from_spec(cls, spec: Dict[str, Any]) -> CrawlTask:
+        """Build a CrawlTask from an ad-hoc run's stored spec (``crawl_runs.params.spec``,
+        design §6.4): the writable task columns, validated by the backend with the task
+        rules. Same column semantics as ``from_db_row`` (one shared constructor, then
+        ``to_actor_kwargs()``); the filter-cache key is ``adhoc_cache_key(spec)``, so the
+        same ad-hoc crawl reuses its cached filter decisions. ``min_date`` arrives as an
+        ISO string. Unknown keys are refused rather than ignored."""
+        if not isinstance(spec, dict):
+            raise ValueError("ad-hoc spec must be an object")
+        unknown = sorted(set(spec) - SPEC_FIELDS)
+        if unknown:
+            raise ValueError(f"ad-hoc spec has unknown field(s) {unknown}")
+        for required in ("actor_class", "search_params"):
+            if not spec.get(required):
+                raise ValueError(f"ad-hoc spec is missing {required!r}")
+        if not isinstance(spec["search_params"], list):
+            raise ValueError("ad-hoc spec search_params must be a list")
+        row = dict(spec)
+        if row.get("min_date") is not None:
+            try:
+                row["min_date"] = datetime.fromisoformat(_spec_min_date_iso(row["min_date"]))
+            except (TypeError, ValueError):
+                raise ValueError(f"ad-hoc spec min_date {spec['min_date']!r} is not ISO 8601") from None
+        row["status"] = "active"
+        return cls._from_columns(row, adhoc_cache_key(spec), "ad-hoc spec")
+
+    @classmethod
+    def _from_columns(cls, row: Dict[str, Any], cache_key: str, what: str) -> CrawlTask:
+        """The one column → CrawlTask mapping behind ``from_db_row`` and ``from_spec``."""
         search_params = [str(p).strip() for p in (row.get("search_params") or []) if str(p).strip()]
         if not search_params:
-            raise ValueError(f"crawl task {row.get('task_id')} has no search_params")
+            raise ValueError(f"{what} has no search_params")
         period = row.get("period")
         if period is not None and period not in ("d", "w", "m"):
-            raise ValueError(f"crawl task {row.get('task_id')}: invalid period {period!r}")
+            raise ValueError(f"{what}: invalid period {period!r}")
         min_date = row.get("min_date")
         if min_date is not None and period is not None:
-            raise ValueError(
-                f"crawl task {row.get('task_id')} has both min_date and period set. They are mutually exclusive."
-            )
+            raise ValueError(f"{what} has both min_date and period set. They are mutually exclusive.")
         actor_params = row.get("actor_params") or {}
         if not isinstance(actor_params, dict):
-            raise ValueError(f"crawl task {row.get('task_id')}: actor_params must be an object")
-        legacy = row.get("legacy_task_id")
+            raise ValueError(f"{what}: actor_params must be an object")
         return cls(
-            task_id=str(legacy) if legacy else f"db:{row['task_id']}",
+            task_id=cache_key,
             actor_class=row["actor_class"],
             search_params=search_params,
             country_id=row.get("country_id") or None,

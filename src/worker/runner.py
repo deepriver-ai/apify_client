@@ -184,6 +184,8 @@ def _block_missing_org(deps: WorkerDeps, msg: Dict[str, Any]) -> None:
     if isinstance(query_id, bool) or not isinstance(query_id, int) or query_id <= 0:
         query_id = None
     kind = msg.get("kind") if isinstance(msg.get("kind"), str) and msg.get("kind") else "crawl"
+    if kind == "adhoc":  # usage kind (usage_tools), not the run kind: an ad-hoc run buys crawl items
+        kind = "crawl"
     try:
         ledger = deps.usage_ledger
         if ledger is None:
@@ -324,7 +326,9 @@ def _min_budget(*values: Any) -> Optional[float]:
 
 
 def plan_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> _Plan:
-    """Re-read the definition from userdb (source of truth) and resolve the run."""
+    """Re-read the definition from userdb (source of truth) and resolve the run: the task
+    row (``kind='crawl'``), the posts linked to the run (``comments``) or the spec stored on
+    the run row (``adhoc``, built with ``CrawlTask.from_spec``; no schedule bookkeeping)."""
     db = deps.db
     kind = run.get("kind") or "crawl"
 
@@ -348,18 +352,36 @@ def plan_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> _Pla
             comment_posts=posts,
         )
 
-    task_row = db.get_task(run["task_id"])
-    if not task_row:
-        raise RunRejected(f"crawl task {run.get('task_id')} not found")
-    if task_row.get("org_id") != run.get("org_id"):
-        raise RunRejected(f"crawl task {task_row['task_id']} org {task_row.get('org_id')} != run org {run.get('org_id')}")
-    ac = db.get_actor_class(task_row["actor_class"])
-    if not ac or not ac.get("enabled", True):
-        raise RunRejected(f"actor_class {task_row['actor_class']!r} is not enabled")
-    if ac.get("run_kind") != "crawl":
-        raise RunRejected(f"actor_class {task_row['actor_class']!r} is a {ac.get('run_kind')} actor, not crawl")
+    if kind == "adhoc":
+        # §6.4: no task row — the spec stored on the run row is the definition (the DB row
+        # is the source of truth; the message's params are only diffed).
+        spec = (run.get("params") or {}).get("spec")
+        if run.get("task_id") is not None:
+            raise RunRejected(f"adhoc run {run['run_id']} carries task_id {run['task_id']}")
+        try:
+            task = CrawlTask.from_spec(spec)
+        except (TypeError, ValueError) as exc:
+            raise RunRejected(f"adhoc run {run['run_id']}: bad params.spec: {exc}") from exc
+        task_cap = spec.get("max_cost_usd_per_run")
+        task_id = None
+    elif kind == "crawl":
+        task_row = db.get_task(run["task_id"])
+        if not task_row:
+            raise RunRejected(f"crawl task {run.get('task_id')} not found")
+        if task_row.get("org_id") != run.get("org_id"):
+            raise RunRejected(f"crawl task {task_row['task_id']} org {task_row.get('org_id')} != run org {run.get('org_id')}")
+        task = CrawlTask.from_db_row(task_row)
+        task_cap = task_row.get("max_cost_usd_per_run")
+        task_id = task_row["task_id"]
+    else:
+        raise RunRejected(f"run {run['run_id']}: unknown kind {kind!r}")
 
-    task = CrawlTask.from_db_row(task_row)
+    ac = db.get_actor_class(task.actor_class)
+    if not ac or not ac.get("enabled", True):
+        raise RunRejected(f"actor_class {task.actor_class!r} is not enabled")
+    if ac.get("run_kind") != "crawl":
+        raise RunRejected(f"actor_class {task.actor_class!r} is a {ac.get('run_kind')} actor, not crawl")
+
     validate_actor_params(task.actor_class, task.actor_params, ac.get("params_schema"))
     kwargs, max_items = build_crawl_kwargs(task, run)
     per_param = ac.get("cap_scope") == "per_param"
@@ -369,8 +391,8 @@ def plan_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> _Pla
         kwargs=kwargs,
         dry_run=bool(run.get("dry_run")) or not task.publish,
         search_item_budget=max_items * (len(task.search_params) if per_param else 1),
-        cost_budget_usd=_min_budget(msg.get("max_cost_usd"), task_row.get("max_cost_usd_per_run"), run.get("admitted_usd")),
-        task_id=task_row["task_id"],
+        cost_budget_usd=_min_budget(msg.get("max_cost_usd"), task_cap, run.get("admitted_usd")),
+        task_id=task_id,
     )
 
 
