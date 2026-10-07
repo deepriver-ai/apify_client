@@ -272,3 +272,47 @@ def test_comment_request_progress(seeded, tmp_path):
     assert db.close_comment_request_if_done(req) == 1
     r = _admin("SELECT status, finished_at FROM crawl_comment_requests WHERE request_id = %s", (req,))[0]
     assert r["status"] == "done" and r["finished_at"] is not None
+
+
+def test_adhoc_run_end_to_end_against_db(seeded, tmp_path, sample_facebook_posts_results, monkeypatch):
+    """Ad-hoc run (design §6.4; needs 2026-10-07_crawl_runs_adhoc_userdb.sql): kind 'adhoc',
+    no task, spec in params.spec → claimed, built with CrawlTask.from_spec, metered and
+    finished as crawler_worker; no schedule bookkeeping."""
+    from unittest.mock import patch
+
+    from src.models.crawl_task import adhoc_cache_key
+    from src.tests.test_crawl_worker import FakeApify
+    from src.worker.runner import ACK, handle_message
+
+    monkeypatch.setattr("src.actors.actor.FILTER_CACHE_PATH", str(tmp_path / "fc.json"))
+    spec = {"name": "", "actor_class": "facebook_page_posts",
+            "search_params": [f"https://www.facebook.com/QroMunicipio/?adhoc={seeded['tag']}"],
+            "country_id": None, "language": None, "max_results": 30, "min_date": None, "period": "w",
+            "publish": True, "get_comments": False, "max_comments": 15, "not_keywords": [],
+            "llm_filter_condition": None, "update_existing": False, "enrich_followers": False,
+            "fetch_attached_url": False, "classify_users": False, "official_page": False,
+            "actor_params": {"add_text_from_images": False}, "max_cost_usd_per_run": 0.5, "metadata": {}}
+    params = {"override_filters": False, "task_id": adhoc_cache_key(spec), "spec": spec}
+    run = _admin(
+        """INSERT INTO crawl_runs (kind, task_id, org_id, trigger, requested_by, status, params, max_items,
+                                   trace_id, queued_at, window_since, dry_run)
+           VALUES ('adhoc', NULL, %s, 'api', %s, 'queued', %s, 20, %s, now(), now() - interval '7 days', true)
+           RETURNING run_id""",
+        (seeded["org"], seeded["user"], json.dumps(params), f"adhoc-test-{seeded['tag']}"))[0]["run_id"]
+    apify = FakeApify({"apify/facebook-posts-scraper": sample_facebook_posts_results}, cost_per_call=0.0104)
+    deps = _deps(tmp_path, apify)
+    msg = _msg(seeded, run_id=run, kind="adhoc", task_id=None, params=params)
+    with patch("src.actors.actor.ApifyActor._existing_news_ids", return_value=set()):
+        assert handle_message(json.dumps(msg), deps) == ACK
+    r = _admin("SELECT * FROM crawl_runs WHERE run_id = %s", (run,))[0]
+    assert r["status"] == "succeeded", r["error"]
+    assert r["kind"] == "adhoc" and r["task_id"] is None
+    assert r["items_paid"] == 4 and float(r["cost_usd"]) == pytest.approx(0.0104) and r["output_path"]
+    assert r["stats"]["effective_params"]["task_id"] == adhoc_cache_key(spec)
+    assert r["stats"]["effective_params"]["max_results"] == 20
+    (call,) = _admin("SELECT * FROM crawl_run_calls WHERE run_id = %s", (run,))
+    (ev,) = _admin("SELECT * FROM usage_events WHERE org_id = %s", (seeded["org"],))
+    assert call["usage_event_id"] == ev["event_id"] == \
+        f"apify-client:crawl-run:{run}:{seeded['org']}:crawl:{call['apify_run_id']}"
+    s = _admin("SELECT * FROM crawl_schedules WHERE task_id = %s", (seeded["task"],))[0]
+    assert s["last_run_id"] is None                         # the seeded task's schedule is untouched

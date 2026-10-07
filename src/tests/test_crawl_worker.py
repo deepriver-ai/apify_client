@@ -17,7 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from src.actors import get_actor
-from src.models.crawl_task import CrawlTask
+from src.models.crawl_task import CrawlTask, adhoc_cache_key
 from src.worker import runner as runner_mod
 from src.worker.db import CrawlDB
 from usage_client import AdmissionRefused
@@ -888,6 +888,163 @@ class TestFromDbRow:
     def test_fields(self):
         task = CrawlTask.from_db_row(_task_row(not_keywords=["a", "b"], status="paused", legacy_theme="sjdr"))
         assert task.not_keywords == ["a", "b"] and task.enabled is False and task.theme == "sjdr"
+
+
+# --------------------------------------------------------------------------- ad-hoc runs (§6.4)
+
+# Cross-repo test vector: media-backend-paid tests/unit/test_crawl.py pins the same key for
+# the same spec (backend canonical form: every writable column, min_date as UTC ISO).
+ADHOC_VECTOR_SPEC = {
+    "name": "", "country_id": None, "language": None, "max_results": 30, "min_date": "2026-10-01T06:00:00+00:00",
+    "period": None, "publish": True, "get_comments": False, "max_comments": 15, "not_keywords": ["fútbol"],
+    "llm_filter_condition": "Solo Querétaro", "update_existing": False, "enrich_followers": False,
+    "fetch_attached_url": False, "classify_users": False, "official_page": False,
+    "actor_params": {"get_comments_after_likes": 100}, "max_cost_usd_per_run": None, "metadata": {},
+    "actor_class": "facebook_keyword_search", "search_params": ["alfa", "zeta"],
+}
+ADHOC_VECTOR_KEY = "adhoc:dea0c96527bc7d8bd769211e88f1bd157ce2b839"
+
+
+def _spec(**over) -> dict:
+    spec = copy.deepcopy(ADHOC_VECTOR_SPEC)
+    spec.update(actor_class="facebook_page_posts", search_params=[FB_PAGE], min_date=None, not_keywords=[],
+                llm_filter_condition=None, actor_params={"add_text_from_images": False})
+    spec.update(over)
+    return spec
+
+
+def _adhoc_world(world, spec=None, **run_over):
+    db, apify, deps, published = world
+    db.tasks.clear()                                     # an ad-hoc run reads no task row
+    spec = spec or _spec()
+    db.runs[1234] = _run_row(**{"kind": "adhoc", "task_id": None,
+                                "params": {"override_filters": False, "task_id": adhoc_cache_key(spec), "spec": spec},
+                                **run_over})
+    msg = _message(kind="adhoc", task_id=None)
+    msg["params"] = dict(db.runs[1234]["params"])
+    return db, apify, deps, published, msg
+
+
+class TestFromSpec:
+    def test_cache_key_vector_matches_the_backend(self):
+        assert adhoc_cache_key(ADHOC_VECTOR_SPEC) == ADHOC_VECTOR_KEY
+        assert CrawlTask.from_spec(ADHOC_VECTOR_SPEC).task_id == ADHOC_VECTOR_KEY
+        # same instant in another offset / params unsorted → same key; volume fields ignored
+        same = {**ADHOC_VECTOR_SPEC, "min_date": "2026-10-01T00:00:00-06:00", "search_params": ["zeta", "alfa"],
+                "max_results": 999, "publish": False, "name": "x", "metadata": {"a": 1}, "max_cost_usd_per_run": 1}
+        assert adhoc_cache_key(same) == ADHOC_VECTOR_KEY
+        assert adhoc_cache_key({**ADHOC_VECTOR_SPEC, "not_keywords": []}) != ADHOC_VECTOR_KEY
+
+    def test_shares_the_db_row_param_path(self):
+        spec = {**ADHOC_VECTOR_SPEC, "language": "es", "max_results": 40}
+        task = CrawlTask.from_spec(spec)
+        row = {**spec, "task_id": 1, "legacy_task_id": adhoc_cache_key(spec),
+               "min_date": datetime(2026, 10, 1, 6, tzinfo=timezone.utc), "status": "active"}
+        assert task.to_actor_kwargs() == CrawlTask.from_db_row(row).to_actor_kwargs()
+        kwargs = task.to_actor_kwargs()
+        assert kwargs["min_date"] == datetime(2026, 10, 1, 6, tzinfo=timezone.utc)
+        assert kwargs["task_id"] == adhoc_cache_key(spec) != ADHOC_VECTOR_KEY and kwargs["get_comments_after_likes"] == 100
+        assert task.enabled is True and task.override_filters is False
+
+    @pytest.mark.parametrize("bad", [
+        None, "x", {"search_params": ["a"]}, {"actor_class": "google_news", "search_params": []},
+        {"actor_class": "google_news", "search_params": "a,b"},
+        {"actor_class": "google_news", "search_params": ["a"], "org_id": 1},
+        {"actor_class": "google_news", "search_params": ["a"], "period": "w", "min_date": "2026-10-01T00:00:00+00:00"},
+        {"actor_class": "google_news", "search_params": ["a"], "min_date": "yesterday"},
+        {"actor_class": "google_news", "search_params": ["a"], "period": "y"},
+    ])
+    def test_refuses_bad_specs(self, bad):
+        with pytest.raises(ValueError):
+            CrawlTask.from_spec(bad)
+
+
+class TestAdhocRuns:
+    def test_adhoc_run_is_built_from_the_run_row_spec(self, world, sample_facebook_posts_results):
+        db, apify, deps, published, msg = _adhoc_world(world)
+        with _no_es():
+            assert handle_message(json.dumps(msg), deps) == ACK
+        run = db.runs[1234]
+        assert run["status"] == "succeeded", run.get("error")
+        assert run["items_paid"] == 4 and run["items_new"] == len(published) == 4
+        assert run["cost_usd"] == pytest.approx(0.01) and len(db.calls) == 1
+        assert run["stats"]["effective_params"]["task_id"] == adhoc_cache_key(_spec())
+        assert "message_params_diff" not in run["stats"]
+        assert db.schedule_updates == []                               # no schedule bookkeeping
+        # metered like any run: one usage event under the run's org, kind crawl
+        (event,) = deps.usage_ledger.recorded()
+        assert event.org_id == 106 and event.kind == "crawl" and event.event_id.startswith("apify-client:crawl-run:1234:")
+
+    def test_db_spec_wins_over_the_message(self, world):
+        db, apify, deps, _, msg = _adhoc_world(world)
+        msg["params"]["spec"] = _spec(max_comments=99)                  # stale / forged copy
+        msg["params"]["max_comments"] = 99
+        with _no_es():
+            handle_message(json.dumps(msg), deps)
+        run = db.runs[1234]
+        assert run["stats"]["effective_params"]["max_comments"] == 15
+        assert run["stats"]["message_params_diff"] == ["max_comments"]
+
+    def test_budgets_come_from_the_spec_and_the_run(self, world):
+        db, apify, deps, _, msg = _adhoc_world(world, spec=_spec(max_cost_usd_per_run=0.05, max_results=40,
+                                                                  search_params=[FB_PAGE, FB_PAGE + "x"]),
+                                               max_items=25, admitted_usd=0.08)
+        plan = runner_mod.plan_run(db.runs[1234], _message(max_cost_usd=0.5), deps)
+        assert plan.cost_budget_usd == pytest.approx(0.05)
+        assert plan.search_item_budget == 25 * 2 and plan.kwargs["max_results"] == 25 and plan.task_id is None
+
+    def test_same_spec_reuses_cached_filter_decisions(self, world, sample_facebook_posts_results):
+        db, apify, deps, _, msg = _adhoc_world(world)
+        seen = sample_facebook_posts_results[0]["url"]
+        with _no_es([seen]):
+            handle_message(json.dumps(msg), deps)
+        assert db.runs[1234]["items_already_seen"] == 1
+        # the same ad-hoc crawl again (another run): the ES drop is now a cached drop
+        db.runs[1235] = {**copy.deepcopy(db.runs[1234]), "run_id": 1235, "status": "queued", "stats": {}}
+        with _no_es():
+            handle_message(json.dumps({**msg, "run_id": 1235}), deps)
+        assert db.runs[1235]["items_cached_filtered"] == 1 and db.runs[1235]["items_already_seen"] == 0
+        # a different spec is a different cache scope
+        other = _spec(not_keywords=["zzz-nunca"])
+        db.runs[1236] = {**copy.deepcopy(db.runs[1234]), "run_id": 1236, "status": "queued", "stats": {},
+                         "params": {"override_filters": False, "spec": other}}
+        with _no_es():
+            handle_message(json.dumps({**msg, "run_id": 1236}), deps)
+        assert db.runs[1236]["items_cached_filtered"] == 0
+
+    @pytest.mark.parametrize("params,why", [
+        ({"override_filters": False}, "bad params.spec"),
+        ({"spec": {"actor_class": "facebook_page_posts"}}, "bad params.spec"),
+        ({"spec": {**ADHOC_VECTOR_SPEC, "org_id": 7}}, "unknown field"),
+        ({"spec": {**ADHOC_VECTOR_SPEC, "actor_class": "facebook_post_comments"}}, "not crawl"),
+        ({"spec": {**ADHOC_VECTOR_SPEC, "actor_class": "nope"}}, "not enabled"),
+        ({"spec": {**ADHOC_VECTOR_SPEC, "actor_params": {"apify_input": {"maxItems": 5000}}}}, "lift"),
+    ])
+    def test_bad_adhoc_runs_fail_without_spend(self, world, params, why):
+        db, apify, deps, _, msg = _adhoc_world(world)
+        db.runs[1234]["params"] = params
+        handle_message(json.dumps(msg), deps)
+        run = db.runs[1234]
+        assert run["status"] == "failed" and why in run["error"], run["error"]
+        assert apify.calls == [] and db.calls == {}
+
+    def test_adhoc_run_with_a_task_id_is_rejected(self, world):
+        db, apify, deps, _, msg = _adhoc_world(world, task_id=159)
+        handle_message(json.dumps(msg), deps)
+        assert db.runs[1234]["status"] == "failed" and apify.calls == []
+
+    def test_adhoc_over_limit_blocks(self, world):
+        db, apify, deps, _, msg = _adhoc_world(world)
+        deps.usage_ledger.spent(106, 15.0)
+        handle_message(json.dumps(msg), deps)
+        assert db.runs[1234]["status"] == "blocked" and apify.calls == []
+
+    def test_missing_org_block_uses_the_crawl_usage_kind(self, world):
+        db, apify, deps, _, msg = _adhoc_world(world)
+        handle_message(json.dumps({**msg, "org_id": None}), deps)
+        (block,) = deps.usage_ledger.blocks
+        assert block["kind"] == "crawl" and block["reason"] == "missing_org"
+        assert db.runs[1234]["status"] == "failed"
 
 
 class _Model:
