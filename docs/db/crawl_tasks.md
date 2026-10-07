@@ -25,8 +25,8 @@ WS-7a ("queue tasks — unblocks recurrence everywhere").
    `apify_client` worker. A scheduler handles recurring tasks (agent_framework §5.2).
 4. Each run records **what it paid for and what it got**: `items_paid / items_new /
    items_already_seen / …` and cost. That gives the waste rate and the posting rate
-   (agent_framework §5.1). Each run also writes its cost to the `usage_events` ledger
-   (`rate_limiting.md` §4, P2).
+   (agent_framework §5.1). Each Apify run also writes its cost to the `usage_events`
+   ledger through `usage_client.apify.run` (`rate_limiting.md` §2.7; §6.1.1).
 5. Hooks for **pre-run range estimates** and **caps**: admission plus `maxItems`
    capped to the remaining budget (`rate_limiting.md` §6 "Apify runs", §7
    `usage_client.apify`).
@@ -241,7 +241,8 @@ Indexes:
 Today `ApifyActor.run_actor()` throws away the run object (`actor.py:79-85`). The
 utility actors (`FacebookProfileActor`, `FacebookCommentsActor`, …) call
 `ApifyClient` directly. Capturing every call is the `usage_client.apify.run()` wrapper
-(`rate_limiting.md` §7).
+(`rate_limiting.md` §7): the worker's `RecordingApifyClient` routes every
+`actor(id).call()` through it and stores the returned `usage_event_id` (§6.1.1).
 
 ### 2.7 `crawl_comment_requests` + `crawl_comment_request_posts` (comments-on-demand)
 
@@ -426,8 +427,9 @@ POST /crawl/runs/request {task_id, options}        (or the scheduler, §6.2)
 rabbit_enqueuer → queue crawl_runs
 apify_client worker:
   claim run → for each Apify call: usage_client.apify.run(actor, input{maxItems≤max_items}, ctx)
-            → INSERT crawl_run_calls + usage_events(tool='apify', kind='crawl'|'comments', unit='items',
-                                                     cost_usd=usageTotalUsd, event_id='apify-client:<apify_run_id>:<org_id>:<kind>:0')
+            → INSERT crawl_run_calls + usage_events(tool='apify', kind='crawl'|'comments'|'profiles', unit='items',
+                                                     cost_usd=usageTotalUsd,
+                                                     event_id='apify-client:crawl-run:<run_id>:<org_id>:<kind>:<apify_run_id>')
             → process_documents() → publish_document() to the document queue (gp3)
             → UPDATE crawl_runs stats/cost/status; UPDATE crawl_schedules
 ```
@@ -467,9 +469,33 @@ New wiring in `apify_client`:
 #### 6.1.1 Worker as implemented (2026-10-06, `src/run_crawl_worker.py`, `src/worker/`)
 
 Points the code had to settle. The message shape above is unchanged.
-- **Missing org**: ack + error log as specified, and the `queued` run is also set
-  `failed` ("message missing org_id") so it does not hold the one-live-run slot. No
-  `usage_blocks` row: the table doesn't exist yet and the worker role has no grant on it.
+- **Missing org**: ack + error log + `usage_blocks(path='worker:apify-client',
+  tool='apify', kind=<message kind>, reason='missing_org', search_id=<message query_id>)`
+  through the `usage_client` ledger (best effort; grant in
+  `2026-10-07_crawler_usage_grants_userdb.sql`), and the `queued` run is also set
+  `failed` ("message missing org_id") so it does not hold the one-live-run slot.
+- **Metering (2026-10-07)**: every Apify call goes through `usage_client.apify.run`, no
+  flag. Context per call: `org_id` = `crawl_runs.org_id`, `user_id` = `requested_by`,
+  `search_id` = `query_id`, `service='apify-client'`, `event_key='crawl-run:<run_id>'`,
+  `kind` from the call's purpose (search → `crawl`, comments → `comments`, profiles →
+  `profiles`, video/other → `crawl`). It admits each call against the org's
+  `usage_limits`, passes Apify `max_items` / `max_total_charge_usd` = the smaller of the
+  run's caps (below) and what was admitted, forwards the actor's own call kwargs, and
+  records one `usage_events` row per Apify run; its `event_id` is stored in
+  `crawl_run_calls.usage_event_id`. Ledger: `USAGE_DB_URI` (default `DATABASE_URI`),
+  spool `USAGE_SPOOL_DIR` (default `cache/usage_spool`).
+- **Admission refused in the worker** (`AdmissionRefused`: the org's budget was used up
+  between the backend's admission and the run, or by the run's own earlier calls):
+
+  | Refusal | No Apify call made yet | After a paid call |
+  |---|---|---|
+  | `over_limit` / `per_request_cap` | `blocked` (terminal, §5.2). The schedule is not touched (no failure counted, window not advanced), so the next tick retries: deferred | `partial` (cost kept) |
+  | `ledger_unreachable` | run released `running → queued`, message requeued after `CRAWL_WORKER_DB_RETRY_SECS` (retry later); if the release fails → `failed` | `partial` |
+
+  The reason goes to `error` and `stats.usage_refusal`; usage_client writes the
+  `usage_blocks` row (path `worker:apify-client`). `crawl_runs.block_id` stays NULL:
+  `usage_client` doesn't return the block id. Later calls of a refused run are refused
+  locally (no second block row, no spend).
 - **What wins**: the run row's `max_items` (≤ task `max_results`), `window_since`
   (replaces the task's `min_date`/`period`), `dry_run` and `params.override_filters`;
   everything else comes from the task row through `CrawlTask.from_db_row()` +
@@ -479,10 +505,12 @@ Points the code had to settle. The message shape above is unchanged.
 - **Item cap**: the paid-item budget across `search` calls is
   `max_items × len(search_params)` for `cap_scope='per_param'`, else `max_items`. It is
   passed to Apify as `max_items` on each search call, and a spent budget stops further
-  calls. Enrichment calls (profiles, comments) are not item-capped.
+  calls. Enrichment calls (profiles, comments) are not capped by this budget; they still
+  carry the `max_items` usage_client admits (at most 1,000 when nothing tighter is known).
 - **Cost cap**: min(message `max_cost_usd`, task `max_cost_usd_per_run`, run
   `admitted_usd`). It is passed as `max_total_charge_usd` (honoured by pay-per-event
-  actors), and further calls stop once it is spent.
+  actors; usage_client lowers it to the whole items admitted), and further calls stop
+  once it is spent or below one item's list price.
 - **`crawl_run_calls.purpose`** comes from the pipeline stage the call runs in
   (`_enrich_user_author` → profiles, `_enrich_comments` → comments, `_download_video` →
   video, other enrichment → other, else search). `items` is the dataset `itemCount`.
@@ -724,6 +752,15 @@ So the importer maps by `theme` and uses `ids.json` only to warn, never as the k
   migration lands, and each `usage_events` row carries the `run_id` (column or `raw`)
   so cost rolls up per run, task, search and org. Lands after the `usage_events` table
   exists (rate-limiting P0/P2).
+  - **Done (2026-10-07):** every Apify run of a queued crawl run is linked:
+    `crawl_run_calls.usage_event_id` = `usage_events.event_id`, and the event carries
+    the run in its id (`apify-client:crawl-run:<run_id>:…`) and the Apify run id in
+    `raw.run_id`. Hand runs (`run_searches.py`) are metered too (`usage_events` with
+    `event_key='run-searches:<session>:<task_id>'`, org = the theme's org; no org →
+    refused unless `--platform`).
+  - **Still open:** hand runs don't create a `crawl_runs` row (`trigger='cli'`) and
+    don't read tasks from `crawl_tasks`; the `usage_event_id` FK; `crawl_runs.block_id`
+    for worker-side blocks.
 
 ## Appendix A — proposed section for `media-backend-paid/docs/DATABASE_POSTGRES.md`
 
@@ -749,8 +786,9 @@ So the importer maps by `theme` and uses `ids.json` only to warn, never as the k
 > | `crawl_run_calls` | One row per Apify actor call of a run: `apify_run_id` (unique, idempotency), `purpose`, `items`, `cost_usd` (Apify `usageTotalUsd`), raw `usage`, and `usage_event_id`, the matching `usage_events.event_id` (no FK) |
 > | `crawl_comment_requests` / `crawl_comment_request_posts` | Comments-on-demand: an org-scoped request (selector, params, exact `estimate_usd`, approval) and its posts (`post_url` = exact ES `_id`, never normalized; `tier`, `depth`, declared/fetched counts). Approval creates `crawl_runs` with `kind='comments'`, one per tier |
 >
-> **Metering.** Every Apify call writes one `usage_events` row (`service='apify-client'`,
-> `tool='apify'`, `kind` = `crawl`|`comments`, `unit='items'`, `event_id =
-> 'apify-client:<apify_run_id>:<org_id>:<kind>:0'`). Admission (`usage_limits`) happens
+> **Metering.** Every Apify run writes one `usage_events` row (`service='apify-client'`,
+> `tool='apify'`, `kind` = `crawl`|`comments`|`profiles`, `unit='items'`, `event_id =
+> 'apify-client:crawl-run:<run_id>:<org_id>:<kind>:<apify_run_id>'`), linked from
+> `crawl_run_calls.usage_event_id`. Admission (`usage_limits`) happens
 > before the run row is queued. See the rate-limiting spec
 > (`business_agent/docs/plans/rate_limiting.md` §4–§7).

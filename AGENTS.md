@@ -20,10 +20,12 @@ Use Python 3. Dependencies are listed in `requirements.txt`.
 
 ```bash
 pip install -r requirements.txt
+pip install -e ../usage_client            # required: every Apify call is metered through it
 source setup_local.sh
 python -m pytest src/tests/ -v
 python -m src.run_searches
 python -m src.run_searches custom.xlsx
+python -m src.run_searches --platform     # themes with no org run under the platform org
 python -m src.run_crawl_worker            # queue worker (see env below); --once for a single message
 ```
 
@@ -41,13 +43,17 @@ Important variables:
 - `RABBIT_HOST`, `RABBIT_PORT`, `RABBIT_USER`, `RABBIT_PASSWORD`, `RABBIT_EXCHANGE`, `RABBIT_QUEUE`, `RABBIT_VIRTUAL_HOST` for RabbitMQ.
 - `MONGO_USER`, `MONGO_PASSWORD`, `MONGO_HOST`, `MONGO_PORT`, `MONGO_AUTHDB` for MongoDB.
 - `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `LLM_CACHE_PATH` for LLM extraction/filtering.
+- `USAGE_DB_URI` — the `usage_client` ledger (userdb: `usage_limits` / `usage_events` / `usage_blocks`); defaults to `DATABASE_URI`. **Every Apify call** (worker and `run_searches.py`) goes through `usage_client.apify.run`: admitted against the org's limits (Apify $15/day per org by default), capped, recorded as one `usage_events` row per Apify run. No ledger → admission fails closed → nothing is bought. `USAGE_SPOOL_DIR` (`cache/usage_spool`) holds `usage_events` writes that failed, replayed later. `PLATFORM_ORG_ID` (optional) overrides the platform org lookup for `run_searches.py --platform`.
+
+Hand runs (`run_searches.py`): each task spends for its theme's org (the importer's theme → org map, `src/scripts/import_tasks_xlsx.py` `KEEP_THEMES` / `RETIRED_THEMES`). A theme with no org is refused (no org, no spend; `usage_blocks(missing_org)`) unless `--platform`.
 
 Crawl-run queue worker (`src/run_crawl_worker.py`) — in addition to `APIFI_API_TOKEN` and the `RABBIT_*` document connection (where documents are published; check `RABBIT_VIRTUAL_HOST`):
 
 - `DATABASE_URI` — userdb as role `crawler_worker` (least privilege; `media-backend-paid/docs/db/migrations/2026-10-06_crawl_worker_role_userdb.sql`). Local runs: a throwaway/local DB, never stg.
 - `CRAWL_RUNS_RABBIT_VIRTUAL_HOST`, `CRAWL_RUNS_QUEUE` (required) — the runs queue it consumes. Local: `document_processing_dev` + `dev_crawl_runs`. `CRAWL_RUNS_RABBIT_HOST/PORT/USER/PASSWORD` default to the `RABBIT_*` values; `CRAWL_RUNS_RABBIT_HEARTBEAT` (60).
 - `CRAWL_WORKER_HEARTBEAT_SECS` (60), `CRAWL_WORKER_DB_RETRY_SECS` (30, delay before requeue when userdb is unreachable), `CRAWL_WORKER_SPOOL_PATH` (`cache/crawl_worker_spool.jsonl`), `CRAWL_WORKER_OUTPUT_DIR` (`cache/runs`, dry runs).
-- `CRAWL_USE_USAGE_CLIENT=1` — route Apify calls through `usage_client.apify.run` (off until that stub is implemented).
+- `USAGE_DB_URI` / `USAGE_SPOOL_DIR` as above (the worker refuses to start with neither `USAGE_DB_URI` nor `DATABASE_URI`). The `crawler` role holds the ledger grants (`2026-10-07_crawler_usage_grants_userdb.sql`).
+- Admission refusals (`AdmissionRefused`, `src/worker/runner.py` docstring): `over_limit` / `per_request_cap` before any Apify call → run `blocked` (schedule untouched, so the next tick retries); `ledger_unreachable` before any call → run released to `queued` and the message requeued after `CRAWL_WORKER_DB_RETRY_SECS`; any refusal after a paid call → `partial`. A message without a valid `org_id` → `usage_blocks(path='worker:apify-client', reason='missing_org')` + run `failed` + ack.
 
 Never point a local worker at the repo `.env` as-is: it sets `RABBIT_VIRTUAL_HOST=document_processing_prod`.
 
@@ -64,7 +70,7 @@ Tests mock MongoDB before importing `src` modules in `src/tests/conftest.py`, so
 - `src/models/sources_management.py` loads source metadata from MongoDB and tracks unknown news domains in `cache/unknown_sources.json`.
 - `src/models/users_management.py` caches social author stats/location in `cache/users.json`.
 - `src/models/crawl_task.py` parses task rows from `tasks.xlsx` (`from_csv_row`) and from userdb `crawl_tasks` (`from_db_row`).
-- `src/worker/` is the crawl-run queue worker: `runner.py` (message → claimed run → actor → funnel/cost → terminal status), `recording.py` (recording Apify client: one `crawl_run_calls` row per call, item/cost budgets), `db.py` (userdb SQL as `crawler_worker`, JSONL spool for cost writes).
+- `src/worker/` is the crawl-run queue worker: `runner.py` (message → claimed run → actor → funnel/cost → terminal status), `recording.py` (recording Apify client: every call through `usage_client.apify.run` via `UsageMeter`, one `crawl_run_calls` row per call with its `usage_event_id`, item/cost budgets), `db.py` (userdb SQL as `crawler_worker`, JSONL spool for cost writes).
 - `src/models/news_parser/` fetches and extracts article HTML content.
 - `src/schema/` contains declarative normalization schemas and parsers.
 - `src/helpers/` contains integration helpers for language, geocoding, MongoDB, RabbitMQ, HTML cleaning, and strings.
