@@ -572,8 +572,8 @@ Run window: `window_since = last_success.newest_item_at − window_overlap`, or
   yet, the task's own window is used. A task `min_date` stays a floor. `failed` /
   `partial` / `blocked` / `cancelled` runs never move it, so a retry re-covers everything
   since the last success. The endpoint refuses `trigger: "schedule"` for a task with no
-  schedule row or a paused one (409), and passes `path='schedule:/crawl/runs/request'`
-  to admission. `trigger: "schedule"` is open to every org role that may launch runs
+  schedule row or a paused one (409), and admits it exactly like an `api` run (endpoint `/crawl/runs/request`, so the
+  same per-request limits apply). `trigger: "schedule"` is open to every org role that may launch runs
   (Oscar 2026-10-07): attribution is by `org_id` + `requested_by` anyway.
 - **Reaper** (§5.2).
   - `running` with `heartbeat_at` older than 5 min → `failed`,
