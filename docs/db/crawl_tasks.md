@@ -700,15 +700,24 @@ Launch a crawl on demand **without a `crawl_tasks` row** — a one-off probe, a 
   smaller — reuses its cached drops; any filter change starts a new scope. Backend
   (`crawl_helpers.adhoc_cache_key`) and worker (`crawl_task.adhoc_cache_key`) both compute
   it; a shared test vector pins them together.
-- **Live runs.** `crawl_runs_one_live_per_task` only covers task runs; identical ad-hoc
-  requests each get a run (each is admitted and paid).
+- **Live runs** (Oscar, 2026-10-06). One live run per spec, mirroring
+  `crawl_runs_one_live_per_task`: the partial unique index `crawl_runs_one_live_adhoc_spec
+  (org_id, params->>'task_id') WHERE kind = 'adhoc' AND status IN ('queued','running')`. An
+  identical spec of the same org already queued/running → the new run is `cancelled`
+  (`duplicate live run`) and the request answers `409 {live_run_id}` (R5). Different orgs or
+  specs don't collide; a terminal run frees the slot.
+- **Missing migration.** On a userdb without the migration the backend answers ad-hoc requests
+  `503 "migration 2026-10-07_crawl_runs_adhoc_userdb.sql not applied"` (catalog check before
+  admission, cached once true; a kind-check violation at insert maps to the same 503). Task runs
+  keep working.
 - **Save as task.** `POST /crawl/tasks/create` (and `propose`) take `from_run_id`: the ad-hoc
   run's spec, the body's fields on top (a body window replaces the spec's), validated like any
   create, `metadata.from_run_id` set. No new endpoint, so no RBAC rows. The task's cache key
   is `db:<task_id>` (the ad-hoc cached drops are not carried over).
 - **Schema.** `media-backend-paid/docs/db/migrations/2026-10-07_crawl_runs_adhoc_userdb.sql`
   (draft, not applied to stg): `crawl_runs_kind_chk` gains `adhoc`; `crawl_runs_kind_ref_chk`
-  requires `task_id IS NULL AND comment_request_id IS NULL` for it. The one-live-run index
+  requires `task_id IS NULL AND comment_request_id IS NULL` for it; plus the live-spec unique
+  index above. The one-live-run index
   (`task_id IS NOT NULL`) and the `crawl_runs_same_org` trigger (every check guarded by `IS NOT
   NULL`; a `query_id` is still checked) need no change; the backend / `crawler_worker` grants
   already cover the new kind. The poller's reaper covers every kind; its settle pass only reads
@@ -718,7 +727,7 @@ Launch a crawl on demand **without a `crawl_tasks` row** — a one-off probe, a 
   local rabbit_enqueuer → `document_processing_dev`/`dev_crawl_runs` → worker with Apify
   mocked, dry runs, real usage ledger): ad-hoc run `succeeded` with cost and funnel, the same
   spec again reusing the cached drop, a refused ad-hoc request (429, `blocked`, nothing
-  enqueued), and "save as task" followed by a run of the promoted task.
+  enqueued), an identical spec while one is live (409, `cancelled`), and "save as task" followed by a run of the promoted task.
 
 ---
 
