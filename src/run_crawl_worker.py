@@ -20,7 +20,8 @@ Two RabbitMQ connections (Q4):
 Manual ack after the run is finished; each run executes on its own thread (with its own
 ``heartbeat_at`` beat) so the consuming connection keeps its heartbeats during long
 actor runs. A message whose run is not ``queued`` (redelivery, cancelled) is acked and
-dropped.
+dropped. A lost runs connection (broker restart, tunnel blip) is reconnected with backoff
+by ``consume_forever`` instead of ending the process.
 
 **Concurrency** (``CRAWL_WORKER_CONCURRENCY``, default 1, recommended 4): prefetch N, so
 up to N runs execute in parallel in this process, each acked when it finishes. Threads
@@ -203,7 +204,13 @@ def consume(deps, queue: str, once: bool = False, concurrency: int = 1) -> None:
             outcome = "ack"
         if outcome == REQUEUE:
             time.sleep(retry_secs)  # don't hot-loop while userdb is unreachable
-        connection.add_callback_threadsafe(functools.partial(settle, delivery_tag, outcome))
+        try:
+            connection.add_callback_threadsafe(functools.partial(settle, delivery_tag, outcome))
+        except Exception as exc:
+            # The consuming connection died while this run worked (consume_forever reconnects).
+            # The unacked message is redelivered on the new connection and dropped there as
+            # "not claimable" — the run itself is finished in the DB, never executed twice.
+            logger.warning("delivery %s not settled (%s): the connection is gone; its redelivery will be dropped", delivery_tag, exc)
 
     def on_message(ch, method, properties, body) -> None:
         threading.Thread(target=work, args=(method.delivery_tag, body), daemon=True,
@@ -226,6 +233,38 @@ def consume(deps, queue: str, once: bool = False, concurrency: int = 1) -> None:
             pass
 
 
+def consume_forever(deps, queue: str, concurrency: int = 1, consume_fn=None, sleep=time.sleep,
+                    max_backoff: float | None = None, max_reconnects: int | None = None) -> None:
+    """``consume`` that survives a lost broker connection (2026-10-07: tunnel blips killed the
+    worker twice in one night — ``AMQPHeartbeatTimeout`` / ``StreamLostError`` ended
+    ``start_consuming`` and the process exited, so every queued run, the scheduled round
+    included, was reaped "not claimed"). On a connection-level AMQP error it reconnects with
+    exponential backoff (2 s doubling, capped at ``CRAWL_WORKER_RECONNECT_MAX_SECS``, default
+    60), forever. Runs in flight keep going on their threads (their state is in the DB); their
+    unacked messages are redelivered on the new connection and dropped as not claimable.
+    Other exceptions still end the process. ``max_reconnects`` is for tests."""
+    from pika.exceptions import AMQPConnectionError, AMQPHeartbeatTimeout, ConnectionClosed, StreamLostError
+
+    consume_fn = consume_fn or consume
+    cap = max_backoff if max_backoff is not None else float(os.getenv("CRAWL_WORKER_RECONNECT_MAX_SECS", "60"))
+    delay, reconnects = 2.0, 0
+    while True:
+        started = time.monotonic()
+        try:
+            consume_fn(deps, queue, once=False, concurrency=concurrency)
+            return  # stop_consuming() — a deliberate stop
+        except (AMQPConnectionError, AMQPHeartbeatTimeout, ConnectionClosed, StreamLostError) as exc:
+            if max_reconnects is not None and reconnects >= max_reconnects:
+                raise
+            if time.monotonic() - started > 300:
+                delay = 2.0  # it had been consuming for a while: start the backoff over
+            reconnects += 1
+            logger.warning("runs connection lost (%s: %s); reconnecting in %.0f s (attempt %d)",
+                           type(exc).__name__, exc, delay, reconnects)
+            sleep(delay)
+            delay = min(delay * 2, cap)
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--once", action="store_true", help="exit after settling one message")
@@ -239,7 +278,10 @@ def main(argv=None) -> None:
     deps = build_deps()
     deps.db.ping()  # fail fast (and loudly) if userdb is unreachable
     deps.db.replay_spool()
-    consume(deps, queue, once=args.once, concurrency=1 if args.once else worker_concurrency())
+    if args.once:
+        consume(deps, queue, once=True, concurrency=1)
+    else:
+        consume_forever(deps, queue, concurrency=worker_concurrency())
 
 
 if __name__ == "__main__":
