@@ -1,13 +1,18 @@
 """Crawl worker against a real throwaway userdb, connected as ``crawler_worker``.
 
-Proves the SQL in src/worker/db.py runs within the role's grants (design Q5). Skipped
-unless both DSNs are set — never point them at stg/prod:
+Proves the SQL in src/worker/db.py and the usage_client ledger traffic (admission reads,
+``usage_events`` / ``usage_blocks`` inserts) run within the role's grants (design Q5,
+rate_limiting.md §2.2). Skipped unless both DSNs are set — never point them at stg/prod.
+The usage tables come from the pending migrations until they are folded into schema.sql:
 
-    dev/testdb.sh proto06_test_crawl_worker
-    psql ... -d proto06_test_crawl_worker -v crawler_password=localcrawler \\
-        -f media-backend-paid/docs/db/migrations/2026-10-06_crawl_worker_role_userdb.sql
-    TEST_CRAWL_USERDB_ADMIN_URI=postgresql://postgres:postgres@localhost:5334/proto06_test_crawl_worker \\
-    TEST_CRAWL_USERDB_URI=postgresql://crawler_worker:localcrawler@localhost:5334/proto06_test_crawl_worker \\
+    M=media-backend-paid/docs/db/migrations
+    dev/testdb.sh proto06_test_crawl_usage media-backend-paid/db/user_db \\
+        $M/2026-10-06_usage_ledger_userdb.sql $M/2026-10-06_usage_admin_rbac_userdb.sql \\
+        $M/2026-10-06_usage_org_view_rbac_userdb.sql $M/2026-10-07_crawler_usage_grants_userdb.sql
+    psql ... -d proto06_test_crawl_usage -v crawler_password=localcrawler \\
+        -f $M/2026-10-06_crawl_worker_role_userdb.sql
+    TEST_CRAWL_USERDB_ADMIN_URI=postgresql://postgres:postgres@localhost:5334/proto06_test_crawl_usage \\
+    TEST_CRAWL_USERDB_URI=postgresql://crawler_worker:localcrawler@localhost:5334/proto06_test_crawl_usage \\
         python -m pytest src/tests/test_crawl_worker_db.py -v
 """
 from __future__ import annotations
@@ -57,6 +62,9 @@ def seeded(tmp_path):
            RETURNING run_id""", (task, org, user, f"crawl-test-{tag}"))[0]["run_id"]
     _admin("INSERT INTO crawl_schedules (task_id, every, next_run_at) VALUES (%s, '1 day', now())", (task,))
     yield {"org": org, "user": user, "task": task, "run": run, "tag": tag}
+    _admin("DELETE FROM usage_events WHERE org_id = %s", (org,))
+    _admin("DELETE FROM usage_blocks WHERE org_id = %s", (org,))
+    _admin("DELETE FROM usage_limits WHERE org_id = %s", (org,))
     _admin("DELETE FROM crawl_runs WHERE org_id = %s", (org,))
     _admin("DELETE FROM crawl_comment_requests WHERE org_id = %s", (org,))
     _admin("DELETE FROM crawl_tasks WHERE org_id = %s", (org,))
@@ -68,6 +76,31 @@ def _db(tmp_path):
     from src.worker.db import CrawlDB
 
     return CrawlDB(WORKER_URI, spool_path=str(tmp_path / "spool.jsonl"))
+
+
+def _ledger(tmp_path):
+    """The usage_client ledger as the worker builds it: same role (crawler_worker)."""
+    from usage_client.ledger import Ledger
+
+    return Ledger(WORKER_URI, spool_dir=tmp_path / "usage_spool")
+
+
+def _deps(tmp_path, apify, published=None):
+    from src.actors import get_actor
+    from src.worker.runner import WorkerDeps
+
+    return WorkerDeps(db=_db(tmp_path), apify_client_factory=lambda: apify,
+                      actor_factory=lambda ac, client: get_actor(ac, client=client),
+                      publish=(published if published is not None else []).append, worker_name="pytest",
+                      output_dir=str(tmp_path / "runs"), usage_ledger=_ledger(tmp_path))
+
+
+def _msg(seeded, **over):
+    msg = {"type": "crawl_run", "run_id": seeded["run"], "kind": "crawl", "task_id": seeded["task"],
+           "org_id": seeded["org"], "user_id": seeded["user"], "trace_id": f"crawl-test-{seeded['tag']}",
+           "max_items": 50, "max_cost_usd": 0.2, "dry_run": True, "params": {}}
+    msg.update(over)
+    return msg
 
 
 def test_connected_as_crawler_worker():
@@ -121,7 +154,8 @@ def test_spool_replays_into_real_db(seeded, tmp_path):
 
     run_id = seeded["run"]
     _db(tmp_path).claim_run(run_id, "pytest")
-    down = CrawlDB("postgresql://crawler_worker:wrong@127.0.0.1:5334/proto06_test_crawl_worker",
+    creds, host = WORKER_URI.split("@", 1)
+    down = CrawlDB(creds.rsplit(":", 1)[0] + ":wrong@" + host,  # same DB, wrong password
                    spool_path=str(tmp_path / "spool.jsonl"), connect_timeout=3)
     down.insert_call({"run_id": run_id, "purpose": "search", "apify_actor_id": "a",
                       "apify_run_id": f"spooled-{seeded['tag']}", "cost_usd": 0.5})
@@ -135,33 +169,84 @@ def test_spool_replays_into_real_db(seeded, tmp_path):
 
 
 def test_handle_message_end_to_end_against_db(seeded, tmp_path, sample_facebook_posts_results, monkeypatch):
-    """Queue message → claim → actor (fake Apify) → crawl_run_calls + funnel → succeeded, no publish."""
+    """Queue message → claim → actor (fake Apify, metered through usage_client as
+    crawler_worker) → crawl_run_calls + usage_events + funnel → succeeded, no publish."""
     from unittest.mock import patch
 
-    from src.actors import get_actor
     from src.tests.test_crawl_worker import FakeApify
-    from src.worker.runner import ACK, WorkerDeps, handle_message
+    from src.worker.runner import ACK, handle_message
 
     monkeypatch.setattr("src.actors.actor.FILTER_CACHE_PATH", str(tmp_path / "fc.json"))
-    _admin("UPDATE crawl_runs SET dry_run = true WHERE run_id = %s", (seeded["run"],))
+    _admin("UPDATE crawl_runs SET dry_run = true, query_id = NULL WHERE run_id = %s", (seeded["run"],))
     apify = FakeApify({"apify/facebook-posts-scraper": sample_facebook_posts_results}, cost_per_call=0.0104)
     published: list = []
-    deps = WorkerDeps(db=_db(tmp_path), apify_client_factory=lambda: apify,
-                      actor_factory=lambda ac, client: get_actor(ac, client=client),
-                      publish=published.append, worker_name="pytest", output_dir=str(tmp_path / "runs"))
-    msg = {"type": "crawl_run", "run_id": seeded["run"], "kind": "crawl", "task_id": seeded["task"],
-           "org_id": seeded["org"], "user_id": seeded["user"], "trace_id": f"crawl-test-{seeded['tag']}",
-           "max_items": 50, "max_cost_usd": 0.2, "dry_run": True, "params": {}}
+    deps = _deps(tmp_path, apify, published)
     with patch("src.actors.actor.ApifyActor._existing_news_ids",
                return_value={sample_facebook_posts_results[0]["url"]}):
-        assert handle_message(json.dumps(msg), deps) == ACK
+        assert handle_message(json.dumps(_msg(seeded)), deps) == ACK
     r = _admin("SELECT * FROM crawl_runs WHERE run_id = %s", (seeded["run"],))[0]
     assert r["status"] == "succeeded", r["error"]
     assert (r["items_paid"], r["items_already_seen"], r["items_new"]) == (4, 1, 3)
     assert float(r["cost_usd"]) == pytest.approx(0.0104) and r["output_path"]
     assert r["stats"]["effective_params"]["task_id"] == f"db:{seeded['task']}"
     assert published == []
-    assert _admin("SELECT count(*) AS n FROM crawl_run_calls WHERE run_id = %s", (seeded["run"],))[0]["n"] == 1
+    (call,) = _admin("SELECT * FROM crawl_run_calls WHERE run_id = %s", (seeded["run"],))
+    # one usage_events row per Apify run, linked from crawl_run_calls.usage_event_id (F1)
+    (ev,) = _admin("SELECT * FROM usage_events WHERE org_id = %s", (seeded["org"],))
+    assert call["usage_event_id"] == ev["event_id"] == \
+        f"apify-client:crawl-run:{seeded['run']}:{seeded['org']}:crawl:{call['apify_run_id']}"
+    assert (ev["tool"], ev["kind"], ev["unit"], ev["service"], ev["scope"]) == \
+        ("apify", "crawl", "items", "apify-client", "org")
+    assert ev["user_id"] == seeded["user"] and float(ev["quantity"]) == 4
+    assert float(ev["cost_usd"]) == pytest.approx(0.0104) and ev["estimated"] is False
+    assert ev["raw"]["run_id"] == call["apify_run_id"]
+    assert _admin("SELECT count(*) AS n FROM usage_blocks WHERE org_id = %s", (seeded["org"],))[0]["n"] == 0
+
+
+def test_over_limit_blocks_the_run_with_a_usage_block(seeded, tmp_path, sample_facebook_posts_results):
+    """An org with no Apify budget left: nothing bought, run 'blocked', usage_blocks row
+    written by crawler_worker."""
+    from src.tests.test_crawl_worker import FakeApify
+    from src.worker.runner import ACK, handle_message
+
+    _admin("""INSERT INTO usage_limits (org_id, scope, tool, kind, window_kind, limit_usd, mode, note)
+              VALUES (%s, 'org', 'apify', NULL, 'day', 0, 'hard', 'pytest: no apify budget')""", (seeded["org"],))
+    apify = FakeApify({"apify/facebook-posts-scraper": sample_facebook_posts_results})
+    assert handle_message(json.dumps(_msg(seeded)), _deps(tmp_path, apify)) == ACK
+    assert apify.calls == []
+    r = _admin("SELECT * FROM crawl_runs WHERE run_id = %s", (seeded["run"],))[0]
+    assert r["status"] == "blocked" and "over_limit" in r["error"]
+    assert r["stats"]["usage_refusal"]["reason"] == "over_limit"
+    (b,) = _admin("SELECT * FROM usage_blocks WHERE org_id = %s", (seeded["org"],))
+    assert (b["path"], b["tool"], b["kind"], b["reason"]) == ("worker:apify-client", "apify", "crawl", "over_limit")
+    s = _admin("SELECT * FROM crawl_schedules WHERE task_id = %s", (seeded["task"],))[0]
+    assert s["last_run_id"] is None and s["consecutive_failures"] == 0
+
+
+def test_missing_org_block_row_as_crawler_worker(seeded, tmp_path):
+    from src.tests.test_crawl_worker import FakeApify
+    from src.worker.runner import ACK, handle_message
+
+    marker = 900_000_000 + seeded["run"]  # usage_blocks.search_id has no FK: a findable marker
+    apify = FakeApify({})
+    try:
+        assert handle_message(json.dumps(_msg(seeded, org_id=None, query_id=marker)), _deps(tmp_path, apify)) == ACK
+        (b,) = _admin("SELECT * FROM usage_blocks WHERE search_id = %s", (marker,))
+        assert (b["org_id"], b["path"], b["tool"], b["kind"], b["reason"]) == \
+            (None, "worker:apify-client", "apify", "crawl", "missing_org")
+        assert _admin("SELECT status FROM crawl_runs WHERE run_id = %s", (seeded["run"],))[0]["status"] == "failed"
+        assert apify.calls == []
+    finally:
+        _admin("DELETE FROM usage_blocks WHERE search_id = %s", (marker,))
+
+
+def test_release_run_within_grants(seeded, tmp_path):
+    db = _db(tmp_path)
+    db.claim_run(seeded["run"], "pytest")
+    assert db.release_run(seeded["run"], "AdmissionRefused(ledger_unreachable)") == 1
+    r = _admin("SELECT status, worker, started_at, error FROM crawl_runs WHERE run_id = %s", (seeded["run"],))[0]
+    assert r["status"] == "queued" and r["worker"] is None and r["started_at"] is None
+    assert db.claim_run(seeded["run"], "pytest")["status"] == "running"  # claimable again
 
 
 def test_comment_request_progress(seeded, tmp_path):
