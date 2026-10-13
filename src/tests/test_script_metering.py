@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from usage_client.apify import APIFY_MIN_CHARGE_CAP_USD  # Apify refuses a lower charge cap
 import pytest
 from usage_client import AdmissionRefused, MissingOrg
 
@@ -101,7 +102,7 @@ class TestRunCommentTasks:
         rct.execute(run, "t", publish=False, usage_meter=meter, cost_budget_usd=0.01, apify_client=apify)
         (call,) = apify.calls
         assert call["kwargs"]["max_items"] == 4                 # ($0.01 - $0.001 start) / $0.002 per comment
-        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.009)
+        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(max(0.009, APIFY_MIN_CHARGE_CAP_USD))
 
     def test_task_file_org_is_used(self):
         from src.scripts import run_comment_tasks as rct
@@ -163,7 +164,7 @@ class TestEnrichPageBios:
         assert ev.event_id.startswith("apify-client:page-bios:")
         (call,) = apify.calls
         assert call["kwargs"]["max_items"] == 1                 # 2 asked, $0.015 buys 1 at $0.0082
-        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.0082)
+        assert float(call["kwargs"]["max_total_charge_usd"]) == pytest.approx(max(0.0082, APIFY_MIN_CHARGE_CAP_USD))
 
     def test_items_capped_to_profiles_asked_for(self):
         apify = FakeApify({})

@@ -7,6 +7,7 @@ DB-backed counterpart (real SQL as crawler_worker) is test_crawl_worker_db.py.
 """
 from __future__ import annotations
 
+from usage_client.apify import APIFY_MIN_CHARGE_CAP_USD  # Apify refuses a lower charge cap
 import copy
 import json
 import uuid
@@ -672,9 +673,9 @@ class TestUsageMetering:
         # date-filter add-on) → min(search budget 20, floor((0.06 - 0.001) / 0.005) = 11) items,
         # charge capped to the admitted 11 x 0.005 + the start charge
         assert kw["max_items"] == 11
-        assert float(kw["max_total_charge_usd"]) == pytest.approx(0.056)
+        assert float(kw["max_total_charge_usd"]) == pytest.approx(max(0.056, APIFY_MIN_CHARGE_CAP_USD))
         (ev,) = deps.usage_ledger.recorded()
-        assert ev.raw["max_items"] == 11 and ev.raw["max_total_charge_usd"] == pytest.approx(0.056)
+        assert ev.raw["max_items"] == 11 and ev.raw["admitted_charge_usd"] == pytest.approx(0.056)
 
     def test_org_budget_caps_the_call(self, world):
         """Partial admission: the org has $0.02 left today → 4 posts at $0.005 (+ the $0.001 start)."""
@@ -684,7 +685,7 @@ class TestUsageMetering:
             handle_message(json.dumps(_message()), deps)
         assert db.runs[1234]["status"] == "succeeded", db.runs[1234].get("error")
         assert apify.calls[0]["kwargs"]["max_items"] == 4
-        assert float(apify.calls[0]["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.021)
+        assert float(apify.calls[0]["kwargs"]["max_total_charge_usd"]) == pytest.approx(max(0.021, APIFY_MIN_CHARGE_CAP_USD))
 
     def test_over_limit_before_any_call_blocks_the_run(self, world):
         db, apify, deps, _ = world
@@ -1138,7 +1139,7 @@ class TestRecordingClient:
         # usage_client asks for floor(0.015 / 0.004) = 3 crawl items and caps the charge to
         # what admission granted for them (3 x 0.004).
         assert fake.calls[0]["kwargs"]["max_items"] == 3
-        assert float(fake.calls[0]["kwargs"]["max_total_charge_usd"]) == pytest.approx(0.012)
+        assert float(fake.calls[0]["kwargs"]["max_total_charge_usd"]) == pytest.approx(max(0.012, APIFY_MIN_CHARGE_CAP_USD))
         client.actor("a/b").call(run_input={})
         assert fake.calls[1]["kwargs"]["max_items"] == 1  # 0.005 left
         with pytest.raises(CostCapExceeded):
