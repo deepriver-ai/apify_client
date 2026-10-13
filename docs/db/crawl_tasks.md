@@ -508,7 +508,11 @@ Points the code had to settle. The message shape above is unchanged.
   everything else comes from the task row through `CrawlTask.from_db_row()` +
   `to_actor_kwargs()`. Message `params` are only diffed (`stats.message_params_diff`).
 - **R2**: with no window, `google_news` gets `timeframe="all"` (its built-in default
-  is `"1d"`) unless the task sets `timeframe` in `actor_params`.
+  is `"1d"`) unless the task sets `timeframe` in `actor_params`. **With** a window
+  (`window_since`, `min_date` or `period`) and no explicit `timeframe`, the actor
+  derives the smallest bucket ≥ the window (`GoogleNewsActor._timeframe_for_window`,
+  2026-10-07). Before that fix the window only fed the client-side date filter while
+  Google News searched `1d`: task 172, runs 272/274.
 - **Item cap**: the paid-item budget across `search` calls is
   `max_items × len(search_params)` for `cap_scope='per_param'`, else `max_items`. It is
   passed to Apify as `max_items` on each search call, and a spent budget stops further
@@ -661,7 +665,7 @@ agent_framework §5.1 and the actor code):
 | window_support | Actors | Effect |
 |---|---|---|
 | `server_min_date` | `facebook_keyword_search` (`start_date`/`end_date`), `twitter_keyword_search` (`timeSince`), `facebook_page_posts` (`onlyPostsNewerThan`, day granularity, `facebook/posts.py:96-113`) | increments don't re-pay (only the overlap day) |
-| `server_coarse` | `linkedin_keyword_search` (`postedLimit` 24h/week/month), `google_news` (`timeframe`) | the window rounds up to the coarse bucket |
+| `server_coarse` | `linkedin_keyword_search` (`postedLimit` 24h/week/month), `google_news` (`timeframe`, derived from the window since 2026-10-07; before, a fixed `1d` unless set) | the window rounds up to the coarse bucket. Verify the bucket in the actor's run log on a task's first run |
 | `client_only` | `instagram_*`, `tiktok_posts` | date filter runs after paying. Rely on newest-first + cap (§6.3) |
 
 ### 6.3 Adaptive caps (optional per schedule)

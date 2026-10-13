@@ -314,7 +314,7 @@ A `CrawlTask` dataclass represents a single crawl job. Each row in `tasks.csv` b
 
 ## Actor-specific params (via `actor_params`)
 
-- **GoogleNewsActor**: `timeframe`, `region_language`, `topics`, `decode_urls`, `extract_descriptions`, `extract_images`, `enrich`. `timeframe` accepts **only** `"1h"`, `"1d"`, `"7d"`, `"30d"`, `"1y"`, `"all"` — any other value (e.g. `"2d"`) fails at the Apify actor with an input-validation error; nothing validates it at task load, so the task just errors in the run log while the run continues.
+- **GoogleNewsActor**: `timeframe` (when unset, derived from the run's `min_date`/`period`: the smallest of `1d`/`7d`/`30d`/`1y`/`all` that covers the window, with 0.1 day of slack for queue wait; with no window, `1d` from the actor and `all` from the crawl worker, §2.8 R2 in `docs/db/crawl_tasks.md`), `region_language`, `topics`, `decode_urls`, `extract_descriptions`, `extract_images`, `enrich`. `timeframe` accepts **only** `"1h"`, `"1d"`, `"7d"`, `"30d"`, `"1y"`, `"all"` — any other value (e.g. `"2d"`) fails at the Apify actor with an input-validation error; nothing validates it at task load, so the task just errors in the run log while the run continues.
 - **TwitterKeywordSearchActor**: `search_params` are classified by shape — values starting with `#` → `contentHashtags`, values **containing a space** → `contentExactPhrases`, plain tokens → `contentKeywords`. Gotcha: a two-word topic query like `huachicol guadalupe` therefore searches an exact adjacent phrase and typically returns 0 results; for AND semantics pass the terms comma-separated (`huachicol,guadalupe` → two keywords). Keep spaces only for genuine phrases (`"nuevo león"`). `topics` is optional in `actor_params` and accepts a string or list using Google News topic keys: `WORLD`, `NATION`, `BUSINESS`, `TECHNOLOGY`, `ENTERTAINMENT`, `SPORTS`, `SCIENCE`, `HEALTH` (e.g. `{"topics":["BUSINESS","TECHNOLOGY"]}`).
 - **InstagramHashtagActor**: `keyword_search`, `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
 - **InstagramProfilePostsActor**: `results_type`, `fetch_attached_url`, `download_images`, `download_video`, `video_dir` (default `cache/media/instagram`), `add_text_from_images`, `add_subtitles`, `add_ai_transcription`, `enrich_followers`, `stats_max_age_days` (default 90)
@@ -444,7 +444,9 @@ GoogleNewsActor.search(search_params, **kwargs)
                 checks location_ids first (any geoid prefix match), falls back to author_location_id
 ```
 
-**Defaults:** region `MX:es-419`, timeframe `1d`, max 30 articles, URL decoding enabled.
+**Defaults:** region `MX:es-419`, max 30 articles, URL decoding enabled. `timeframe`: an explicit `actor_params.timeframe` wins. Otherwise it covers the run's window (`period` d/w/m → `1d`/`7d`/`30d`, or `min_date` → the smallest bucket ≥ its age). Only with no window at all is it `1d`.
+
+> **2026-10-07 incident.** Before this rule the actor always sent `1d` unless the task set `timeframe`. A 30-day event task (172, `period: m`, runs 272/274) searched only the last day (`when:1d` in the Google News URL) and returned 14 and 8 articles where Google News had many more. Our date filter can only remove results after download, never widen the search. **Check the window the actor actually used** in the Apify log (`Time Frame: …`, `Search URL … when:…`), not only the task row. Tests: `TestTimeframeFromWindow` in `src/tests/test_google_news_actor.py`.
 
 ## Instagram hashtag pipeline
 

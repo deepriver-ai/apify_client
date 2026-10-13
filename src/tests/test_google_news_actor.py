@@ -145,3 +145,41 @@ class TestGetCommentsIgnored:
                 results = actor.search(["test"], get_comments=True, enrich=False)
         # Should not raise, comments remain empty
         assert isinstance(results, list)
+
+
+class TestTimeframeFromWindow:
+    """The actor's ``timeframe`` follows the run's window when the task doesn't set one."""
+
+    def _timeframe(self, actor, sample_google_news_results, **kwargs):
+        with patch.object(actor, "run_actor", return_value=sample_google_news_results) as mock_run:
+            with patch.object(News, "fetch_and_parse", return_value=True):
+                actor.search(["carrera orizaba"], enrich=False, **kwargs)
+        return mock_run.call_args[0][0]["timeframe"]
+
+    def test_period_month_searches_30_days(self, actor, sample_google_news_results):
+        assert self._timeframe(actor, sample_google_news_results, period="m") == "30d"
+
+    def test_period_week_and_day(self, actor, sample_google_news_results):
+        assert self._timeframe(actor, sample_google_news_results, period="w") == "7d"
+        assert self._timeframe(actor, sample_google_news_results, period="d") == "1d"
+
+    def test_min_date_30_days_back_after_queue_wait(self, actor, sample_google_news_results):
+        min_date = datetime.now() - timedelta(days=30, minutes=30)
+        assert self._timeframe(actor, sample_google_news_results, min_date=min_date) == "30d"
+
+    def test_min_date_iso_string_with_tz(self, actor, sample_google_news_results):
+        from datetime import timezone
+        min_date = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        assert self._timeframe(actor, sample_google_news_results, min_date=min_date) == "7d"
+
+    def test_old_min_date_widens_to_year_then_all(self, actor, sample_google_news_results):
+        assert self._timeframe(actor, sample_google_news_results,
+                               min_date=datetime.now() - timedelta(days=90)) == "1y"
+        assert self._timeframe(actor, sample_google_news_results,
+                               min_date=datetime.now() - timedelta(days=500)) == "all"
+
+    def test_explicit_timeframe_wins(self, actor, sample_google_news_results):
+        assert self._timeframe(actor, sample_google_news_results, period="m", timeframe="7d") == "7d"
+
+    def test_no_window_keeps_default(self, actor, sample_google_news_results):
+        assert self._timeframe(actor, sample_google_news_results) == "1d"

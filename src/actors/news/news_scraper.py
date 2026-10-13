@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-from src.actors.actor import ApifyActor
+from src.actors.actor import PERIOD_DAYS, ApifyActor
 from src.models.news import News
 
 # Google News Scraper
@@ -22,6 +23,12 @@ GOOGLE_NEWS_TOPICS = {
     "HEALTH",
 }
 
+# The actor's search window (``when:`` in the Google News URL), smallest first, in days.
+TIMEFRAME_DAYS = (("1d", 1), ("7d", 7), ("30d", 30), ("1y", 365))
+DEFAULT_TIMEFRAME = "1d"
+# A window computed at request time is a little older when the run starts (queue wait).
+WINDOW_SLACK_DAYS = 0.1
+
 
 class GoogleNewsActor(ApifyActor):
 
@@ -30,7 +37,9 @@ class GoogleNewsActor(ApifyActor):
     def search(self, search_params: List[str], **kwargs) -> List[News]:
         self.search_params = search_params
         max_articles = kwargs.get("max_articles") or kwargs.get("max_results", 30)
-        timeframe = kwargs.get("timeframe", "1d")
+        timeframe = kwargs.get("timeframe") or self._timeframe_for_window(kwargs.get("min_date"), kwargs.get("period"))
+        logger.info("Google News timeframe=%s (explicit=%s, min_date=%s, period=%s)", timeframe,
+                    bool(kwargs.get("timeframe")), kwargs.get("min_date"), kwargs.get("period"))
         region_language = kwargs.get("region_language", "MX:es-419")
         decode_urls = kwargs.get("decode_urls", True)
         extract_descriptions = kwargs.get("extract_descriptions", True)
@@ -54,6 +63,31 @@ class GoogleNewsActor(ApifyActor):
         articles = [News.from_google_news(item) for item in raw_results]
 
         return self.process_documents(articles, **kwargs)
+
+    @staticmethod
+    def _timeframe_for_window(min_date: Any, period: Optional[str]) -> str:
+        """Smallest actor timeframe covering the run's window (``min_date`` or ``period``).
+
+        Without it a 30-day event search ran with the actor default ``1d`` and the date
+        filter could only cut further (2026-10-07, runs 272/274).
+        """
+        days: Optional[float] = None
+        if isinstance(min_date, str):
+            try:
+                min_date = datetime.fromisoformat(min_date.replace("Z", "+00:00"))
+            except ValueError:
+                min_date = None
+        if isinstance(min_date, datetime):
+            now = datetime.now(min_date.tzinfo) if min_date.tzinfo else datetime.now()
+            days = (now - min_date).total_seconds() / 86400
+        elif period:
+            days = PERIOD_DAYS.get(period)
+        if days is None:
+            return DEFAULT_TIMEFRAME
+        for timeframe, limit in TIMEFRAME_DAYS:
+            if days <= limit + WINDOW_SLACK_DAYS:
+                return timeframe
+        return "all"
 
     @staticmethod
     def _normalize_topics(raw_topics: Any) -> List[str]:
