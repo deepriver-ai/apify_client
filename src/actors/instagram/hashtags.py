@@ -45,12 +45,7 @@ class InstagramHashtagActor(ApifyActor):
         documents = self._filter_llm(documents, snippet_max_len=2500, **kwargs)
         documents = self._enrich_comments(documents, **kwargs)
 
-        if task_id:
-            survived = {id(doc) for doc in documents}
-            for doc in all_docs:
-                key = self._filter_cache_key(doc, task_id)
-                self._filter_cache[key] = id(doc) in survived
-            self._save_filter_cache()
+        self._remember_filter_decisions(all_docs, documents, task_id)
 
         return documents
 

@@ -47,20 +47,12 @@ class TwitterKeywordSearchActor(ApifyActor):
         documents = self._filter_llm(documents, snippet_max_len=2500, **kwargs)
         documents = self._enrich_comments(documents, **kwargs)
 
-        if task_id:
-            survived = {id(doc) for doc in documents}
-            for doc in all_docs:
-                key = self._filter_cache_key(doc, task_id)
-                self._filter_cache[key] = id(doc) in survived
-            self._save_filter_cache()
+        self._remember_filter_decisions(all_docs, documents, task_id)
 
         return documents
 
-    def search(self, search_params: List[str], **kwargs) -> List[TwitterPost]:
-        self.search_params_keywords = search_params
-        results_limit = kwargs.get("results_limit") or kwargs.get("max_results", 30)
-        language = kwargs.get("language")
-
+    @staticmethod
+    def _classify(search_params: List[str]):
         keywords: List[str] = []
         phrases: List[str] = []
         hashtags: List[str] = []
@@ -74,11 +66,39 @@ class TwitterKeywordSearchActor(ApifyActor):
                 phrases.append(t)
             else:
                 keywords.append(t)
+        return keywords, phrases, hashtags
+
+    @classmethod
+    def member_clause(cls, search_params: List[str]) -> str:
+        """One task's query as the actor builds it from ``contentKeywords`` /
+        ``contentExactPhrases`` / ``contentHashtags``: space-joined, i.e. **AND** (seen in the
+        actor's run log, 2026-10-13: task ["guadalupe","huachicol"] → ``guadalupe huachicol``).
+        Mirrors media-backend-paid ``crawl_batch.twitter_clause``."""
+        keywords, phrases, hashtags = cls._classify(search_params)
+        return " ".join(keywords + [f'"{p}"' for p in phrases] + [f"#{h}" for h in hashtags])
+
+    @classmethod
+    def batch_query(cls, clauses: List[List[str]]) -> str:
+        """A batch run's query (docs/db/crawl_tasks.md §6.5): the members' clauses OR-ed, each
+        in parentheses, so every member keeps exactly its own meaning."""
+        parts = [c for c in (cls.member_clause(p) for p in clauses) if c]
+        return "(" + " OR ".join(f"({c})" for c in parts) + ")"
+
+    def search(self, search_params: List[str], **kwargs) -> List[TwitterPost]:
+        self.search_params_keywords = search_params
+        results_limit = kwargs.get("results_limit") or kwargs.get("max_results", 30)
+        language = kwargs.get("language")
 
         run_input: Dict[str, Any] = {
             "search_type": "Latest",
             "numberOfTweets": max(20, results_limit),
         }
+        batch_clauses = kwargs.get("batch_clauses")
+        if batch_clauses:
+            keywords, phrases, hashtags = [], [], []
+            run_input["query"] = self.batch_query(batch_clauses)
+        else:
+            keywords, phrases, hashtags = self._classify(search_params)
         if keywords:
             run_input["contentKeywords"] = keywords
         if phrases:
@@ -97,10 +117,11 @@ class TwitterKeywordSearchActor(ApifyActor):
         elif period and period in _PERIOD_TO_WITHIN:
             run_input["timeWithinTime"] = _PERIOD_TO_WITHIN[period]
 
-        if not any(k in run_input for k in ("contentKeywords", "contentExactPhrases", "contentHashtags")):
+        if not any(k in run_input for k in ("query", "contentKeywords", "contentExactPhrases", "contentHashtags")):
             run_input["query"] = " OR ".join(search_params) if search_params else ""
 
-        logger.info("X keyword search: keywords=%s phrases=%s hashtags=%s", keywords, phrases, hashtags)
+        logger.info("X keyword search: keywords=%s phrases=%s hashtags=%s query=%s", keywords, phrases, hashtags,
+                    run_input.get("query"))
         raw_results = self.run_actor(run_input)
 
         posts = [TwitterPost.from_twitter(item) for item in raw_results]

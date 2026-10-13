@@ -167,13 +167,17 @@ class CrawlTask:
                                  f"crawl task {row.get('task_id')}")
 
     @classmethod
-    def from_spec(cls, spec: Dict[str, Any]) -> CrawlTask:
+    def from_spec(cls, spec: Dict[str, Any], cache_key: str | None = None) -> CrawlTask:
         """Build a CrawlTask from an ad-hoc run's stored spec (``crawl_runs.params.spec``,
         design §6.4): the writable task columns, validated by the backend with the task
         rules. Same column semantics as ``from_db_row`` (one shared constructor, then
         ``to_actor_kwargs()``); the filter-cache key is ``adhoc_cache_key(spec)``, so the
         same ad-hoc crawl reuses its cached filter decisions. ``min_date`` arrives as an
-        ISO string. Unknown keys are refused rather than ignored."""
+        ISO string. Unknown keys are refused rather than ignored.
+
+        ``cache_key`` overrides the filter-cache key: a **batch** run (docs/db/crawl_tasks.md
+        §6.5) stores its merged spec the same way and passes its ``batch:<sha1>`` key, read
+        from ``crawl_runs.params.task_id`` (the backend's; not recomputed here)."""
         if not isinstance(spec, dict):
             raise ValueError("ad-hoc spec must be an object")
         unknown = sorted(set(spec) - SPEC_FIELDS)
@@ -191,7 +195,7 @@ class CrawlTask:
             except (TypeError, ValueError):
                 raise ValueError(f"ad-hoc spec min_date {spec['min_date']!r} is not ISO 8601") from None
         row["status"] = "active"
-        return cls._from_columns(row, adhoc_cache_key(spec), "ad-hoc spec")
+        return cls._from_columns(row, cache_key or adhoc_cache_key(spec), "batch spec" if cache_key else "ad-hoc spec")
 
     @classmethod
     def _from_columns(cls, row: Dict[str, Any], cache_key: str, what: str) -> CrawlTask:

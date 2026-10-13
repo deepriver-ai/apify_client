@@ -316,3 +316,68 @@ def test_adhoc_run_end_to_end_against_db(seeded, tmp_path, sample_facebook_posts
         f"apify-client:crawl-run:{run}:{seeded['org']}:crawl:{call['apify_run_id']}"
     s = _admin("SELECT * FROM crawl_schedules WHERE task_id = %s", (seeded["task"],))[0]
     assert s["last_run_id"] is None                         # the seeded task's schedule is untouched
+
+
+def test_batch_run_end_to_end_against_db(seeded, tmp_path, sample_facebook_posts_results, monkeypatch):
+    """Batch run (design §6.5; needs 2026-10-13_crawl_batch_runs_userdb.sql): kind 'batch',
+    merged spec in params.spec, members in crawl_run_tasks → claimed (members turn live),
+    one Apify call over both pages, attribution written to crawl_run_tasks and every
+    member's schedule updated, all as crawler_worker; members not live once finished."""
+    from unittest.mock import patch
+
+    from src.tests.test_crawl_worker import FakeApify
+    from src.worker.runner import ACK, handle_message
+
+    if not _admin("SELECT to_regclass('public.crawl_run_tasks') IS NOT NULL AS ok")[0]["ok"]:
+        pytest.skip("crawl_run_tasks missing: apply 2026-10-13_crawl_batch_runs_userdb.sql to the test DB")
+    monkeypatch.setattr("src.actors.actor.FILTER_CACHE_PATH", str(tmp_path / "fc.json"))
+    org, user, tag = seeded["org"], seeded["user"], seeded["tag"]
+    page_a = _admin("SELECT search_params FROM crawl_tasks WHERE task_id = %s", (seeded["task"],))[0]["search_params"][0]
+    page_b = f"https://www.facebook.com/OtraPagina/?t={tag}"
+    task_b = _admin(
+        """INSERT INTO crawl_tasks (org_id, actor_class, search_params, max_results, status, actor_params)
+           VALUES (%s, 'facebook_page_posts', %s, 30, 'active', '{"add_text_from_images": false}')
+           RETURNING task_id""", (org, json.dumps([page_b])))[0]["task_id"]
+    _admin("INSERT INTO crawl_schedules (task_id, every, next_run_at) VALUES (%s, '1 day', now())", (task_b,))
+    spec = {"name": "batch", "actor_class": "facebook_page_posts", "search_params": sorted([page_a, page_b]),
+            "country_id": None, "language": None, "max_results": 30, "min_date": None, "period": "w",
+            "publish": True, "get_comments": False, "max_comments": 15, "not_keywords": [],
+            "llm_filter_condition": None, "update_existing": False, "enrich_followers": False,
+            "fetch_attached_url": False, "classify_users": False, "official_page": False,
+            "actor_params": {"add_text_from_images": False}, "max_cost_usd_per_run": None,
+            "metadata": {"batch_task_ids": [seeded["task"], task_b]}}
+    key = "batch:" + uuid.uuid4().hex + "abcdefgh"
+    params = {"override_filters": False, "task_id": key, "spec": spec}
+    run = _admin(
+        """INSERT INTO crawl_runs (kind, task_id, org_id, trigger, requested_by, status, params, max_items,
+                                   trace_id, window_since, dry_run)
+           VALUES ('batch', NULL, %s, 'schedule', %s, 'requested', %s, 30, %s, now() - interval '7 days', true)
+           RETURNING run_id""", (org, user, json.dumps(params), f"batch-test-{tag}"))[0]["run_id"]
+    for t, p in ((seeded["task"], page_a), (task_b, page_b)):
+        _admin("""INSERT INTO crawl_run_tasks (run_id, task_id, org_id, search_params, max_items, filter_cache_key)
+                  VALUES (%s, %s, %s, %s, 30, %s)""", (run, t, org, json.dumps([p]), f"db:{t}"))
+    # the seeded single run of task A is queued: the batch can't go live with it (one live run per task)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _admin("UPDATE crawl_runs SET status = 'queued', queued_at = now() WHERE run_id = %s", (run,))
+    _admin("UPDATE crawl_runs SET status = 'cancelled' WHERE run_id = %s", (seeded["run"],))
+    _admin("UPDATE crawl_runs SET status = 'queued', queued_at = now() WHERE run_id = %s", (run,))
+    assert [r["live"] for r in _admin("SELECT live FROM crawl_run_tasks WHERE run_id = %s", (run,))] == [True, True]
+
+    apify = FakeApify({"apify/facebook-posts-scraper": sample_facebook_posts_results}, cost_per_call=0.0104)
+    msg = _msg(seeded, run_id=run, kind="batch", task_id=None, max_items=30, params=params)
+    with patch("src.actors.actor.ApifyActor._existing_news_ids", return_value=set()):
+        assert handle_message(json.dumps(msg), _deps(tmp_path, apify)) == ACK
+    r = _admin("SELECT * FROM crawl_runs WHERE run_id = %s", (run,))[0]
+    assert r["status"] == "succeeded", r["error"]
+    assert r["items_paid"] == 4 and r["stats"]["effective_params"]["task_id"] == key
+    (call,) = apify.calls
+    assert sorted(u["url"] for u in call["run_input"]["startUrls"]) == sorted([page_a, page_b])
+    rows = {m["task_id"]: m for m in _admin("SELECT * FROM crawl_run_tasks WHERE run_id = %s", (run,))}
+    a, b = rows[seeded["task"]], rows[task_b]
+    assert (a["items_matched"], b["items_matched"]) == (3, 0)        # 3 QroMunicipio posts, 1 reel URL
+    assert a["live"] is False and b["live"] is False and a["newest_item_at"] is not None
+    assert float(a["cost_usd"]) + float(b["cost_usd"]) == pytest.approx(0.0104, abs=1e-5)
+    assert a["stats"]["attribution"] == "keyword_match"
+    for t in (seeded["task"], task_b):
+        s = _admin("SELECT last_run_id, last_success_at FROM crawl_schedules WHERE task_id = %s", (t,))[0]
+        assert s["last_run_id"] == run and s["last_success_at"] is not None

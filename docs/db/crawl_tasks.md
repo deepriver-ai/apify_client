@@ -186,8 +186,8 @@ scrapes and video downloads.
 | Column | Type | Notes |
 |---|---|---|
 | `run_id` | `bigint` identity PK | |
-| `kind` | `text NOT NULL` CHECK `crawl`/`comments`/`adhoc` | `adhoc` (§6.4) pending migration `2026-10-07_crawl_runs_adhoc_userdb.sql` |
-| `task_id` | FK `crawl_tasks NULL` | set when `kind='crawl'`; NULL for `comments` and `adhoc` |
+| `kind` | `text NOT NULL` CHECK `crawl`/`comments`/`adhoc`/`batch` | `adhoc` (§6.4) pending migration `2026-10-07_crawl_runs_adhoc_userdb.sql`; `batch` (§6.5) pending `2026-10-13_crawl_batch_runs_userdb.sql` |
+| `task_id` | FK `crawl_tasks NULL` | set when `kind='crawl'`; NULL for `comments`, `adhoc` and `batch` (members in `crawl_run_tasks`, §6.5) |
 | `comment_request_id` | FK `crawl_comment_requests NULL` | set when `kind='comments'`. A CHECK ties each kind to its FK |
 | `org_id` | `integer NOT NULL` FK `orgs` | attribution (`rate_limiting.md` §2.3) |
 | `query_id` | FK `user_searches NULL ON DELETE SET NULL` | → `usage_events.search_id` |
@@ -737,6 +737,61 @@ Launch a crawl on demand **without a `crawl_tasks` row** — a one-off probe, a 
   mocked, dry runs, real usage ledger): ad-hoc run `succeeded` with cost and funnel, the same
   spec again reusing the cached drop, a refused ad-hoc request (429, `blocked`, nothing
   enqueued), an identical spec while one is live (409, `cancelled`), and "save as task" followed by a run of the promoted task.
+
+### 6.5 Batched runs (Oscar, 2026-10-13; branch `crawl-batch` in media-backend-paid + apify_client + poller)
+
+Tasks of one org that share every field but `search_params` run as **one** run whose actor
+call gets the merged list: fewer Apify starts, shorter rounds, one row per group. Plan and the
+13 decisions (with the per-actor analysis):
+`business_agent/docs/plans/crawl_batched_runs_2026-10.md`. Endpoint contract:
+`media-backend-paid/docs/endpoints/crawl.md` § Batched runs.
+
+- **Request.** `POST /crawl/runs/request {task_ids: [...]}` (the poller sends it for an org's
+  due schedules when `CRAWL_SCHEDULER_BATCH=1`). The backend groups by the group key (every
+  writable field but `search_params` / `name` / `metadata`, plus `max_results` only for
+  `per_param` actors), only for actors with `crawl_actor_classes.batch_max_params`
+  (X, `instagram_hashtags`, `instagram_profile_posts`, `facebook_page_posts`; not the loop
+  actors `facebook_keyword_search` / `instagram_profile_queenlike`, nor `google_news`,
+  `linkedin_keyword_search`, `tiktok_posts` until their cap semantics are checked). A `per_call`
+  task whose last result hit its cap runs alone (saturation split). Singletons take the
+  single-task path unchanged.
+- **Row.** `kind = 'batch'`, `task_id` NULL, `max_items` = Σ member caps (`per_call`) or the
+  common per-param cap (`per_param`), `params` = the usual snapshot of the merged definition +
+  `params.spec` (merged canonical spec) + `params.batch` (members); `params.task_id` = the
+  filter-cache key `batch:<sha1>` (the spec without `search_params` and the volume/notes
+  fields: the group's filter signature, whoever is in it). Members: **`crawl_run_tasks`**
+  (`search_params`, `max_items` = the member's share, `window_since`, `filter_cache_key`,
+  attribution columns, `live`). One live run per task holds across single and batch runs
+  (DB triggers, advisory locks).
+- **Worker.** `plan_run` builds the task with `CrawlTask.from_spec(params.spec,
+  cache_key=params.task_id)` — the spec is **frozen at request time** (a single run re-reads
+  its task row; a batch doesn't) — and reads the members (`CrawlDB.get_run_tasks`); a member
+  param outside the spec, a non-`batch:` key, no members or a `task_id` fail the run without
+  spend. From there it is a crawl run (actor checks, budgets: items = `max_items × len(union)`
+  for `per_param`, else `max_items`; cost = min(message `max_cost_usd`, spec breaker,
+  `admitted_usd`); metering as `crawl`).
+- **X.** The actor ANDs a task's params (run log 2026-10-13: `["guadalupe","huachicol"]` →
+  `guadalupe huachicol`), so a batch sends `query = ((clause₁) OR (clause₂) …)`, each clause
+  exactly what that task sends alone (`TwitterKeywordSearchActor.member_clause`), with
+  `contentLanguage` / `timeSince` / `timeWithinTime` as before. Verify the query in the first
+  batched run's Apify log.
+- **Filter cache** (`ApifyActor.batch` = `src/worker/batch.py::BatchContext`): a URL is skipped
+  when it is cached as dropped under the batch key **or any member's key** (same filters); a
+  decision is written under the batch key and the keys of the members the document belongs
+  to (`_remember_filter_decisions`, the one write path of every `process_documents`).
+- **Attribution** (approximate, by text match, `src/worker/batch.py`): title + body (+ the
+  attached article), lower-cased, accents stripped, whole words; X members match when all
+  their params match, others when any does; URL params match the post's URL / profile /
+  source by the page or account name. Written before the run's finish (`CrawlDB.update_run_tasks`,
+  spooled like the cost writes): `items_matched` (paid items in), `items_new` (documents to
+  publish), `newest_item_at`, `cost_usd` (run cost × matched share, unmatched split evenly),
+  `stats` (`cost_share`, `run_unmatched`, `saturated`). The run row stays authoritative.
+- **Schedules.** `trigger='schedule'` batch runs update `last_run_id` / `last_success_at` of
+  **every** member; the poller settles batch runs per member. A member's next window starts
+  from its attributed `newest_item_at` (none → its own `window_since` carried); a batch takes
+  the earliest member window.
+- **Release order.** Worker first (an older worker fails a `batch` message as an unknown kind,
+  no spend), then the migration, the backend, the poller flag.
 
 ---
 

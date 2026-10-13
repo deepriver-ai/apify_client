@@ -111,6 +111,9 @@ class ApifyActor:
         self.search_params_keywords: List[str] = []  # Should be set by the actor subclass when the scraping is keyword or hashtag-based
         self._filter_cache: Dict[str, bool] = self._load_filter_cache()
         self.filtered_documents: List[Dict[str, Any]] = []
+        # Batch runs (docs/db/crawl_tasks.md §6.5): the worker sets a src.worker.batch.BatchContext
+        # here — extra filter-cache keys (read + write) and per-member attribution. None = one task.
+        self.batch = None
         self.reset_funnel()
 
     # --- Run funnel (crawl_runs counters, docs/db/crawl_tasks.md §2.5 / §7.3) ---
@@ -133,6 +136,9 @@ class ApifyActor:
         if not hasattr(self, "funnel"):
             self.reset_funnel()
         self.funnel["docs_in"] += len(documents)
+        batch = getattr(self, "batch", None)
+        if batch is not None:
+            batch.on_pipeline_input(documents)
         for doc in documents:
             raw = doc.data.get("timestamp") if hasattr(doc, "data") else None
             if not raw:
@@ -225,12 +231,13 @@ class ApifyActor:
         also where pipeline input is counted for the run funnel.
         """
         self._count_pipeline_input(documents)
-        if override or not task_id:
+        keys = self._filter_cache_read_keys(task_id)
+        if override or not keys:
             return documents
 
         filtered = [
             doc for doc in documents
-            if self._filter_cache.get(self._filter_cache_key(doc, task_id)) is not False
+            if not any(self._filter_cache.get(self._filter_cache_key(doc, key)) is False for key in keys)
         ]
         self._record_filtered_documents(documents, filtered, "cached", task_id=task_id)
         if len(filtered) < len(documents):
@@ -241,6 +248,30 @@ class ApifyActor:
                 task_id,
             )
         return filtered
+
+    def _filter_cache_read_keys(self, task_id: str) -> List[str]:
+        """The task's key, plus every member's key in a batch run (same filters, plan D8)."""
+        keys = [task_id] if task_id else []
+        batch = getattr(self, "batch", None)
+        if batch is not None:
+            keys += [k for k in batch.read_keys if k not in keys]
+        return keys
+
+    def _remember_filter_decisions(self, all_docs: List, survivors: List, task_id: str) -> None:
+        """Cache each document's keep/drop decision under the task's key — in a batch run
+        also under the keys of the members the document belongs to — and save the cache.
+        Called once at the end of every ``process_documents`` (base and overrides)."""
+        batch = getattr(self, "batch", None)
+        if not task_id and batch is None:
+            return
+        survived = {id(doc) for doc in survivors}
+        for doc in all_docs:
+            keys = [task_id] if task_id else []
+            if batch is not None:
+                keys += [k for k in batch.doc_keys(doc) if k not in keys]
+            for key in keys:
+                self._filter_cache[self._filter_cache_key(doc, key)] = id(doc) in survived
+        self._save_filter_cache()
 
     def process_documents(self, documents: List, **kwargs) -> List:
         """Run the full post-creation pipeline: filter → enrich → filter → enrich → filter.
@@ -273,12 +304,7 @@ class ApifyActor:
         documents = self._enrich_comments(documents, **kwargs)
 
         # Cache filtering results for this task
-        if task_id:
-            survived = {id(doc) for doc in documents}
-            for doc in all_docs:
-                key = self._filter_cache_key(doc, task_id)
-                self._filter_cache[key] = id(doc) in survived
-            self._save_filter_cache()
+        self._remember_filter_decisions(all_docs, documents, task_id)
 
         return documents
 

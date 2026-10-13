@@ -52,6 +52,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from usage_client import AdmissionRefused
 
 from src.models.crawl_task import CrawlTask
+from src.worker.batch import BatchContext, BatchMember
 from src.worker.recording import SERVICE, CallRecorder, RecordingApifyClient, UsageMeter, instrument_actor
 
 logger = logging.getLogger(__name__)
@@ -199,7 +200,7 @@ def _block_missing_org(deps: WorkerDeps, msg: Dict[str, Any]) -> None:
     if isinstance(query_id, bool) or not isinstance(query_id, int) or query_id <= 0:
         query_id = None
     kind = msg.get("kind") if isinstance(msg.get("kind"), str) and msg.get("kind") else "crawl"
-    if kind == "adhoc":  # usage kind (usage_tools), not the run kind: an ad-hoc run buys crawl items
+    if kind in ("adhoc", "batch"):  # usage kind (usage_tools), not the run kind: both buy crawl items
         kind = "crawl"
     try:
         ledger = deps.usage_ledger
@@ -333,6 +334,7 @@ class _Plan:
     cost_budget_usd: Optional[float]
     comment_posts: List[Dict[str, Any]] = field(default_factory=list)
     task_id: Optional[int] = None
+    batch_members: List[BatchMember] = field(default_factory=list)
 
 
 def _min_budget(*values: Any) -> Optional[float]:
@@ -342,8 +344,10 @@ def _min_budget(*values: Any) -> Optional[float]:
 
 def plan_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> _Plan:
     """Re-read the definition from userdb (source of truth) and resolve the run: the task
-    row (``kind='crawl'``), the posts linked to the run (``comments``) or the spec stored on
-    the run row (``adhoc``, built with ``CrawlTask.from_spec``; no schedule bookkeeping)."""
+    row (``kind='crawl'``), the posts linked to the run (``comments``), the spec stored on
+    the run row (``adhoc``, built with ``CrawlTask.from_spec``; no schedule bookkeeping) or
+    the merged spec + the ``crawl_run_tasks`` members (``batch``, design §6.5: the spec is
+    frozen at request time; filter-cache key = ``params.task_id``, ``batch:<sha1>``)."""
     db = deps.db
     kind = run.get("kind") or "crawl"
 
@@ -379,6 +383,30 @@ def plan_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> _Pla
             raise RunRejected(f"adhoc run {run['run_id']}: bad params.spec: {exc}") from exc
         task_cap = spec.get("max_cost_usd_per_run")
         task_id = None
+    elif kind == "batch":
+        params = run.get("params") or {}
+        spec = params.get("spec")
+        cache_key = params.get("task_id")
+        if run.get("task_id") is not None:
+            raise RunRejected(f"batch run {run['run_id']} carries task_id {run['task_id']}")
+        if not isinstance(cache_key, str) or not cache_key.startswith("batch:"):
+            raise RunRejected(f"batch run {run['run_id']}: params.task_id {cache_key!r} is not a batch cache key")
+        try:
+            task = CrawlTask.from_spec(spec, cache_key=cache_key)
+        except (TypeError, ValueError) as exc:
+            raise RunRejected(f"batch run {run['run_id']}: bad params.spec: {exc}") from exc
+        try:
+            members = [BatchMember.from_row(r) for r in db.get_run_tasks(run["run_id"])]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RunRejected(f"batch run {run['run_id']}: bad crawl_run_tasks rows: {exc}") from exc
+        if not members:
+            raise RunRejected(f"batch run {run['run_id']} has no crawl_run_tasks members")
+        union = set(task.search_params)
+        stray = sorted({p for m in members for p in m.search_params} - union)
+        if stray:
+            raise RunRejected(f"batch run {run['run_id']}: member params {stray} not in the merged spec")
+        task_cap = spec.get("max_cost_usd_per_run")
+        task_id = None
     elif kind == "crawl":
         task_row = db.get_task(run["task_id"])
         if not task_row:
@@ -400,6 +428,10 @@ def plan_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> _Pla
     validate_actor_params(task.actor_class, task.actor_params, ac.get("params_schema"))
     kwargs, max_items = build_crawl_kwargs(task, run)
     per_param = ac.get("cap_scope") == "per_param"
+    batch_members = members if kind == "batch" else []
+    if batch_members and task.actor_class == "twitter_keyword_search":
+        # one OR query of the members' own clauses (each AND, as a single task runs today)
+        kwargs["batch_clauses"] = [m.search_params for m in batch_members]
     return _Plan(
         actor_class=task.actor_class,
         search_params=task.search_params,
@@ -408,6 +440,7 @@ def plan_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> _Pla
         search_item_budget=max_items * (len(task.search_params) if per_param else 1),
         cost_budget_usd=_min_budget(msg.get("max_cost_usd"), task_cap, run.get("admitted_usd")),
         task_id=task_id,
+        batch_members=batch_members,
     )
 
 
@@ -476,6 +509,8 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
             client = RecordingApifyClient(deps.apify_client_factory(), recorder, _meter_for(run, deps))
             actor = deps.actor_factory(plan.actor_class, client)
             instrument_actor(actor, recorder)
+            if plan.batch_members:
+                actor.batch = BatchContext(plan.actor_class, plan.batch_members)
             docs = list(actor.search(plan.search_params, **plan.kwargs) or [])
 
         expanded, attached = _expand(docs)
@@ -517,6 +552,16 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
         _record_comment_posts(db, plan.comment_posts, docs)
 
     counters = _counters(run, actor, recorder, docs, main_out, attached_out)
+    batch = getattr(actor, "batch", None) if actor is not None else None
+    if plan is not None and plan.batch_members and batch is not None:
+        # approximate per-member attribution (design §6.5); written before the run's own
+        # finish so a reader of a succeeded batch run finds its members' numbers
+        rows = batch.attribution(docs, counters.get("cost_usd"))
+        stats["batch"] = {"members": len(rows), "items_in": batch.items_in, "unmatched": batch.unmatched}
+        try:
+            db.update_run_tasks(run_id, rows)
+        except Exception as exc:
+            logger.warning("run %s: batch member attribution not written: %s", run_id, exc)
     stats.update({
         "funnel": dict(getattr(actor, "funnel", {}) or {}),
         "calls": len(recorder.calls),
@@ -536,11 +581,14 @@ def execute_run(run: Dict[str, Any], msg: Dict[str, Any], deps: WorkerDeps) -> s
         # Reaped while we worked (stale heartbeat): the scheduler already failed it and
         # settles the schedule from that row; our late outcome must not touch it.
         logger.warning("run %s: finished after being reaped — schedule bookkeeping skipped", run_id)
-    elif run.get("trigger") == "schedule" and run.get("task_id") and status != "blocked":
-        try:
-            db.update_schedule_after_run(run["task_id"], run_id, status == "succeeded")
-        except Exception as exc:
-            logger.warning("run %s: schedule bookkeeping failed: %s", run_id, exc)
+    elif run.get("trigger") == "schedule" and status != "blocked":
+        # a batch run gives every member's schedule the same feedback (design §6.5)
+        member_ids = [m.task_id for m in plan.batch_members] if plan is not None and plan.batch_members else []
+        for task_id in ([run["task_id"]] if run.get("task_id") else member_ids):
+            try:
+                db.update_schedule_after_run(task_id, run_id, status == "succeeded")
+            except Exception as exc:
+                logger.warning("run %s: schedule bookkeeping of task %s failed: %s", run_id, task_id, exc)
     if run.get("comment_request_id"):
         try:
             db.close_comment_request_if_done(run["comment_request_id"])

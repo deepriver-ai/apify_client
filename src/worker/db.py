@@ -131,6 +131,14 @@ class CrawlDB:
     def get_actor_class(self, actor_class: str) -> Optional[Dict[str, Any]]:
         return self._fetchone("SELECT * FROM public.crawl_actor_classes WHERE actor_class = %s", (actor_class,))
 
+    def get_run_tasks(self, run_id: int) -> List[Dict[str, Any]]:
+        """Members of a batch run (``crawl_run_tasks``, design §6.5)."""
+        return self._fetchall(
+            """SELECT task_id, search_params, max_items, window_since, filter_cache_key
+                 FROM public.crawl_run_tasks WHERE run_id = %s ORDER BY task_id""",
+            (run_id,),
+        )
+
     def get_comment_posts(self, run_id: int) -> List[Dict[str, Any]]:
         return self._fetchall(
             """SELECT row_id, request_id, post_url, tier, depth, stored_comments
@@ -178,6 +186,11 @@ class CrawlDB:
     def insert_call(self, row: Dict[str, Any]) -> None:
         self._write_or_spool("insert_call", row)
 
+    def update_run_tasks(self, run_id: int, rows: List[Dict[str, Any]]) -> Optional[bool]:
+        """A batch run's per-member attribution (``crawl_run_tasks`` columns the ``crawler``
+        role may update). Spooled like the other cost writes."""
+        return self._write_or_spool("run_tasks", {"run_id": run_id, "rows": rows})
+
     def finish_run(self, run_id: int, status: str, error: Optional[str], output_path: Optional[str],
                    counters: Dict[str, Any], stats: Dict[str, Any]) -> Optional[bool]:
         """True = written; False = the run was no longer ``running`` (reaped by the
@@ -204,6 +217,16 @@ class CrawlDB:
             )
             if not inserted:
                 logger.info("crawl_run_calls: apify run %s already recorded (redelivery/replay)", row["apify_run_id"])
+        elif op == "run_tasks":
+            for row in payload["rows"]:
+                self._execute(
+                    """UPDATE public.crawl_run_tasks
+                          SET items_matched = %s, items_new = %s, newest_item_at = %s, cost_usd = %s,
+                              stats = stats || %s
+                        WHERE run_id = %s AND task_id = %s""",
+                    (row.get("items_matched"), row.get("items_new"), row.get("newest_item_at"), row.get("cost_usd"),
+                     Jsonb(json.loads(_dumps(row.get("stats") or {}))), payload["run_id"], row["task_id"]),
+                )
         elif op == "finish_run":
             counters = payload["counters"]
             sets = ", ".join(f"{col} = %s" for col in FINISH_COLUMNS)
