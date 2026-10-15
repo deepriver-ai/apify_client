@@ -86,6 +86,10 @@ Twisted==26.4.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==1.26.20
+# usage_client (private repo deepriver-ai/usage_client) is not pinned
+# here — a git+ssh pin needs its deploy key. The Dockerfile installs it (USAGE_CLIENT_VERSION,
+# BuildKit secret gh-ssh-usage-client); locally: pip install -e <workspace>/usage_client.
+#usage-client @ git+ssh://git@github.com-usage_client/deepriver-ai/usage_client.git@v0.2.1 # Take care to match version to that in Dockerfile!! See Dockerfile for example of downloading from private git repository.
 w3lib==2.4.1
 warcio==1.8.1
 zope.interface==8.5

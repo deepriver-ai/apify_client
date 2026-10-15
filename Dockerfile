@@ -6,7 +6,7 @@ FROM python:3.14.5-bookworm AS usage_client_downloader
 #   docker build --secret id=gh-ssh-usage-client,src=$HOME/.ssh/usage_client_deploy \
 #                --build-arg USAGE_CLIENT_VERSION=<tag> ...
 # (rate_limiting.md §3.4 step 3, Q26). Keep the tag the same across services.
-ARG USAGE_CLIENT_VERSION
+ARG USAGE_CLIENT_VERSION="v0.2.1"
 RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client && rm -rf /var/lib/apt/lists/*
 COPY <<EOF /root/.ssh/config
 Host github.com-usage_client
